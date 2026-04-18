@@ -35,10 +35,23 @@ const TREATMENTS = [
   { id: "T3", name: "Cropstar",   color: "#b69b6a" }, // Fungicida Cropstar
 ];
 
-// Array com os 12 rolos: ["R1", "R2", ..., "R12"]
+// Array com os rolos: ["R1", "R2", ...]
 // Array.from cria um array; o segundo argumento (_, i) ignora o valor
 // e usa o índice i para gerar o nome do rolo
-const ROLOS = Array.from({ length: 12 }, (_, i) => `R${i + 1}`);
+const ROLOS_VIGOR = Array.from({ length: 24 }, (_, i) => `R${i + 1}`);
+const ROLOS_GERMINACAO = Array.from({ length: 12 }, (_, i) => `R${i + 1}`);
+const ROLOS_SEM_VERMICULINA = Array.from({ length: 5 }, (_, i) => `R${i + 1}`);
+
+function getRolosForKind(kind) {
+  if (kind === "germinacao") return ROLOS_GERMINACAO;
+  if (kind === "sem_vermiculina") return ROLOS_SEM_VERMICULINA;
+  return ROLOS_VIGOR;
+}
+
+function getSeedsPerRoloForKind(kind) {
+  if (kind === "sem_vermiculina") return 20;
+  return 25;
+}
 
 // Os 3 tipos de plântula contados em cada rolo
 const TIPOS = ["N", "A", "M"];
@@ -122,6 +135,130 @@ function calcMoisturePercent(m1, m2, m3) {
   const drySampleMass = dry - tare; // massa da amostra seca
   if (wetSampleMass <= 0 || drySampleMass < 0 || dry > wet) return null;
   return ((wetSampleMass - drySampleMass) / wetSampleMass) * 100;
+}
+
+function getCountKind(entry) {
+  const k = entry?.kind;
+  if (k === "vigor" || k === "germinacao") return k;
+  if (k === "final") return "germinacao";
+  const d = Number(entry?.dat);
+  if (Number.isFinite(d) && d <= 5) return "vigor";
+  return "germinacao";
+}
+
+function countKindOrder(entryOrKind) {
+  const k = typeof entryOrKind === "string" ? entryOrKind : getCountKind(entryOrKind);
+  return k === "germinacao" ? 1 : 0;
+}
+
+function findFirstUnfilledCell(grid, kind) {
+  const rolos = getRolosForKind(kind);
+  for (const t of TREATMENTS) {
+    const tid = t.id;
+    for (const r of rolos) {
+      for (const tipo of TIPOS) {
+        const v = grid?.[tid]?.[r]?.[tipo];
+        if (v === "" || v === null || typeof v === "undefined" || (typeof v === "number" && Number.isNaN(v))) {
+          return { treatId: tid, rolo: r, tipo };
+        }
+      }
+    }
+  }
+  const lastT = TREATMENTS[TREATMENTS.length - 1]?.id || "T0";
+  const lastR = rolos[rolos.length - 1] || "R1";
+  return { treatId: lastT, rolo: lastR, tipo: "M" };
+}
+
+function sanitizeFileName(name) {
+  return String(name || "export")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "_")
+    .slice(0, 140);
+}
+
+async function exportFirstSvgAsPng(containerEl, fileName, opts = {}) {
+  const { background = "#ffffff", pixelRatio = window.devicePixelRatio || 2 } = opts;
+  if (!containerEl) throw new Error("Container não encontrado.");
+  const svgEl = containerEl.querySelector("svg");
+  if (!svgEl) throw new Error("SVG do gráfico não encontrado.");
+
+  const rect = svgEl.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
+
+  const cloned = svgEl.cloneNode(true);
+  cloned.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  cloned.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  if (!cloned.getAttribute("viewBox")) cloned.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  cloned.setAttribute("width", String(width));
+  cloned.setAttribute("height", String(height));
+
+  const svgText = new XMLSerializer().serializeToString(cloned);
+  const svgBlob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+  const svgUrl = URL.createObjectURL(svgBlob);
+
+  try {
+    const img = new Image();
+    img.decoding = "async";
+    const loaded = new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error("Falha ao carregar SVG para exportação."));
+    });
+    img.src = svgUrl;
+    await loaded;
+
+    const pr = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(width * pr);
+    canvas.height = Math.round(height * pr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas não disponível para exportação.");
+
+    ctx.setTransform(pr, 0, 0, pr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("Não foi possível gerar o PNG.");
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = sanitizeFileName(fileName);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } finally {
+    URL.revokeObjectURL(svgUrl);
+  }
+}
+
+function downloadJsonFile(data, fileName) {
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = sanitizeFileName(fileName);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function autosaveJsonToProjectRoot(payload) {
+  if (!import.meta?.env?.DEV) return;
+  try {
+    await fetch("/__autosave", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {}
 }
 
 const CALENDAR_EVENTS = [
@@ -267,15 +404,31 @@ const INFO_TEXTS = {
  * Usa string vazia "" em vez de 0 para distinguir "não preenchido" de "zero sementes".
  * Retorna: { T0: { R1: { N:"", A:"", M:"" }, R2: {...}, ... }, T1: {...}, ... }
  */
-function emptyGrid() {
+function emptyGrid(kind = "vigor") {
+  const rolos = getRolosForKind(kind);
   const g = {};
   TREATMENTS.forEach(t => {
     g[t.id] = {};
-    ROLOS.forEach(r => {
+    rolos.forEach(r => {
       g[t.id][r] = { N: "", A: "", M: "" };
     });
   });
   return g;
+}
+
+function ensureGridHasRolos(grid, rolos) {
+  const next = { ...(grid || {}) };
+  TREATMENTS.forEach(t => {
+    const tid = t.id;
+    next[tid] = { ...(next[tid] || {}) };
+    rolos.forEach(r => {
+      if (!next[tid][r]) next[tid][r] = { N: "", A: "", M: "" };
+      if (typeof next[tid][r].N === "undefined") next[tid][r].N = "";
+      if (typeof next[tid][r].A === "undefined") next[tid][r].A = "";
+      if (typeof next[tid][r].M === "undefined") next[tid][r].M = "";
+    });
+  });
+  return next;
 }
 
 /**
@@ -284,9 +437,9 @@ function emptyGrid() {
  * O operador ?. evita erros se o rolo ainda não existir.
  * @returns {{ N, A, M, total }}
  */
-function sumTreatment(grid, tid) {
+function sumTreatment(grid, tid, rolos = ROLOS_VIGOR) {
   let N = 0, A = 0, M = 0;
-  ROLOS.forEach(r => {
+  rolos.forEach(r => {
     N += Number(grid[tid]?.[r]?.N || 0);
     A += Number(grid[tid]?.[r]?.A || 0);
     M += Number(grid[tid]?.[r]?.M || 0);
@@ -302,11 +455,17 @@ function sumTreatment(grid, tid) {
  * @returns {{ T0: "12.34", T1: "20.56", ... }}
  */
 function calcIVG(counts) {
+  const byDat = new Map();
+  counts.forEach(c => {
+    const existing = byDat.get(c.dat);
+    if (!existing || countKindOrder(c) > countKindOrder(existing)) byDat.set(c.dat, c);
+  });
+  const unique = Array.from(byDat.values());
   const ivg = {};
   TREATMENTS.forEach(t => {
     let sum = 0;
-    counts.forEach(c => {
-      const { N } = sumTreatment(c.grid, t.id);
+    unique.forEach(c => {
+      const { N } = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
       if (c.dat > 0) sum += N / c.dat; // Normais dividido pelo DAT
     });
     ivg[t.id] = sum.toFixed(2); // 2 casas decimais
@@ -484,13 +643,23 @@ export default function App() {
   const [dat, setDat]                 = useState("");          // DAT do formulário
   const [day0, setDay0]               = useState("");          // Dia 0 do ensaio (data do tratamento)
   const [countDate, setCountDate]     = useState("");          // Data da contagem (yyyy-mm-dd)
-  const [grid, setGrid]               = useState(emptyGrid()); // Dados N/A/M do formulário
+  const [countKind, setCountKind]     = useState("vigor");
+  const [grid, setGrid]               = useState(emptyGrid("vigor")); // Dados N/A/M do formulário
   const [activeTreat, setActiveTreat] = useState("T0");        // Aba ativa no formulário
   const [saved, setSaved]             = useState(false);       // Animação de confirmação
   const [editIdx, setEditIdx]         = useState(null);        // null = novo, número = edição
   const [showTrial, setShowTrial]     = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const countsRef                     = useRef([]);
+  const importJsonInputRef            = useRef(null);
+  const autosaveTimerRef              = useRef(null);
+  const autosaveSignatureRef          = useRef("");
+  const autosaveSnapshotRef           = useRef({ day0: "", counts: [], moistureRows: [] });
+  const [editFocus, setEditFocus]     = useState(null);
+  const [moistureRows, setMoistureRows] = useState([
+    { id: "Rep 1", m1: "", m2: "", m3: "" },
+    { id: "Rep 2", m1: "", m2: "", m3: "" },
+  ]);
 
   // ── PERSISTIR DADOS ──────────────────────────────────────────────
   // useCallback evita recriar a função a cada render
@@ -554,6 +723,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem(MOISTURE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) setMoistureRows(parsed);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(MOISTURE_STORAGE_KEY, JSON.stringify(moistureRows));
+    } catch {}
+  }, [moistureRows]);
+
+  useEffect(() => {
     const meta = { day0 };
     writeLocalMeta(meta);
     (async () => {
@@ -568,7 +752,15 @@ export default function App() {
     const d = calcDat(day0, countDate);
     if (d === null || d < 0) return;
     setDat(String(d));
-  }, [day0, countDate]);
+    if (editIdx === null) {
+      setCountKind(d <= 5 ? "vigor" : "germinacao");
+    }
+  }, [day0, countDate, editIdx]);
+
+  useEffect(() => {
+    const rolos = getRolosForKind(countKind);
+    setGrid(prev => ensureGridHasRolos(prev, rolos));
+  }, [countKind]);
 
   useEffect(() => {
     countsRef.current = counts;
@@ -595,6 +787,92 @@ export default function App() {
     if (!loading && !day0) setShowTrial(true);
   }, [loading, day0]);
 
+  useEffect(() => {
+    autosaveSnapshotRef.current = { day0, counts, moistureRows };
+  }, [day0, counts, moistureRows]);
+
+  const scheduleAutosave = (force = false) => {
+    const snapshot = autosaveSnapshotRef.current;
+    const signature = JSON.stringify({ meta: { day0: snapshot.day0 }, counts: snapshot.counts, moistureRows: snapshot.moistureRows });
+    if (!force && signature === autosaveSignatureRef.current) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(async () => {
+      autosaveSignatureRef.current = signature;
+      await autosaveJsonToProjectRoot({
+        schema: "germinacao_bi_autosave_v1",
+        autosavedAt: new Date().toISOString(),
+        meta: { day0: snapshot.day0 },
+        counts: snapshot.counts,
+        moistureRows: snapshot.moistureRows,
+      });
+    }, 450);
+  };
+
+  useEffect(() => {
+    scheduleAutosave();
+  }, [counts, day0, moistureRows]);
+
+  useEffect(() => {
+    const onClickCapture = (e) => {
+      const el = e?.target;
+      if (!el || typeof el.closest !== "function") return;
+      if (!el.closest("button")) return;
+      scheduleAutosave();
+    };
+    document.addEventListener("click", onClickCapture, true);
+    return () => {
+      document.removeEventListener("click", onClickCapture, true);
+    };
+  }, []);
+
+  const exportAllJson = () => {
+    const payload = {
+      schema: "germinacao_bi_export_v1",
+      exportedAt: new Date().toISOString(),
+      meta: { day0 },
+      counts,
+      moistureRows,
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadJsonFile(payload, `germinacao_bi_${stamp}.json`);
+  };
+
+  const requestImportJson = () => {
+    const el = importJsonInputRef.current;
+    if (!el) return;
+    el.value = "";
+    el.click();
+  };
+
+  const applyImportedData = async (payload) => {
+    const nextCounts = Array.isArray(payload?.counts) ? payload.counts : null;
+    if (!nextCounts) throw new Error("Arquivo inválido: campo 'counts' não encontrado.");
+    const nextDay0 = payload?.meta?.day0;
+    const nextMoistureRows = Array.isArray(payload?.moistureRows) ? payload.moistureRows : null;
+
+    if (!window.confirm("Importar este arquivo vai substituir os dados atuais. Continuar?")) return;
+
+    if (typeof nextDay0 === "string") setDay0(nextDay0);
+    if (nextMoistureRows) setMoistureRows(nextMoistureRows);
+
+    await persist(nextCounts);
+    setView("dashboard");
+    setEditIdx(null);
+    alert("Importação concluída.");
+  };
+
+  const handleImportJsonChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      await applyImportedData(payload);
+    } catch (err) {
+      alert(err?.message || "Não foi possível importar o arquivo.");
+    }
+  };
+
   // ── SALVAR CONTAGEM ──────────────────────────────────────────────
   const handleSave = async () => {
     if (!day0) return alert("Informe a data do Dia 0 (tratamento) para calcular o DAT.");
@@ -602,17 +880,17 @@ export default function App() {
     const d = calcDat(day0, countDate);
     if (d === null) return alert("Informe datas válidas para Dia 0 e para a contagem.");
     if (d < 0) return alert("A data da contagem não pode ser anterior ao Dia 0.");
-    const entry = { dat: d, grid, countDate, savedAt: new Date().toISOString() };
+    const entry = { dat: d, grid, countDate, kind: countKind, savedAt: new Date().toISOString() };
     let next;
     if (editIdx !== null) {
       // Edição: substitui o item no índice editIdx
       next = counts.map((c, i) => i === editIdx ? entry : c);
     } else {
-      const exists = counts.findIndex(c => c.dat === d);
-      if (exists >= 0 && !window.confirm(`Já existe contagem no DAT ${d}. Substituir?`)) return;
+      const exists = counts.findIndex(c => c.dat === d && getCountKind(c) === countKind);
+      if (exists >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "Vigor" : "Germinação"}). Substituir?`)) return;
       next = exists >= 0
         ? counts.map((c, i) => i === exists ? entry : c)
-        : [...counts, entry].sort((a, b) => a.dat - b.dat); // Mantém ordem crescente
+        : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b))); // Mantém ordem crescente
     }
     await persist(next);
     setSaved(true);
@@ -624,10 +902,14 @@ export default function App() {
     const c = counts[idx];
     setDat(String(c.dat));
     setCountDate(String((c.countDate || c.savedAt || "").slice(0, 10)));
-    setGrid(JSON.parse(JSON.stringify(c.grid))); // Cópia profunda para não mutar o original
+    setCountKind(getCountKind(c));
+    const copied = JSON.parse(JSON.stringify(c.grid));
+    setGrid(ensureGridHasRolos(copied, getRolosForKind(getCountKind(c))));
     setEditIdx(idx);
     setView("entry");
-    setActiveTreat("T0");
+    const focus = findFirstUnfilledCell(c.grid, getCountKind(c));
+    setEditFocus(focus);
+    setActiveTreat(focus?.treatId || "T0");
   };
 
   // ── DELETAR CONTAGEM ─────────────────────────────────────────────
@@ -643,13 +925,17 @@ export default function App() {
     const mm = String(today.getMonth() + 1).padStart(2, "0");
     const dd = String(today.getDate()).padStart(2, "0");
     setCountDate(`${yyyy}-${mm}-${dd}`);
-    setDat(""); setGrid(emptyGrid()); setEditIdx(null);
+    setCountKind("vigor");
+    setDat(""); setGrid(emptyGrid("vigor")); setEditIdx(null);
+    setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
 
   const startNewAtDate = (isoDate) => {
     setCountDate(isoDate);
-    setDat(""); setGrid(emptyGrid()); setEditIdx(null);
+    setCountKind("vigor");
+    setDat(""); setGrid(emptyGrid("vigor")); setEditIdx(null);
+    setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
 
@@ -764,12 +1050,33 @@ export default function App() {
         </div>
         {/* Botões de navegação entre telas */}
         <div className="app-header-nav">
+          <input
+            ref={importJsonInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleImportJsonChange}
+            style={{ display: "none" }}
+          />
           {[["dashboard", "📊 Dashboard"], ["entry", "➕ Nova Contagem"]].map(([v, label]) => (
             <button key={v} className="tab-btn"
               onClick={() => v === "entry" ? startNew() : setView(v)}
               style={{ background: view === v ? UI.accent : "transparent", color: view === v ? "#fff" : UI.textSoft, border: `1px solid ${view === v ? UI.accent : UI.border}` }}
             >{label}</button>
           ))}
+          <button
+            className="tab-btn"
+            onClick={exportAllJson}
+            style={{ background: "transparent", color: UI.textSoft, border: `1px solid ${UI.border}` }}
+          >
+            ⬇️ JSON
+          </button>
+          <button
+            className="tab-btn"
+            onClick={requestImportJson}
+            style={{ background: "transparent", color: UI.textSoft, border: `1px solid ${UI.border}` }}
+          >
+            ⬆️ Importar
+          </button>
           <button
             className="tab-btn"
             onClick={() => setShowTrial(true)}
@@ -783,14 +1090,16 @@ export default function App() {
       {/* ════ ROTEAMENTO DE TELAS ════════════════════════════════════
           Em vez de um router externo, usamos condicionais simples */}
       {view === "dashboard" && (
-        <DashboardView counts={counts} startEdit={startEdit} deleteCount={deleteCount} openCalendar={() => setShowCalendar(true)} />
+        <DashboardView counts={counts} startEdit={startEdit} deleteCount={deleteCount} openCalendar={() => setShowCalendar(true)} moistureRows={moistureRows} setMoistureRows={setMoistureRows} />
       )}
       {view === "entry" && (
         <EntryView
           dat={dat} setDat={setDat} day0={day0} openTrial={() => setShowTrial(true)} countDate={countDate} setCountDate={setCountDate} grid={grid}
+          countKind={countKind} setCountKind={setCountKind}
           activeTreat={activeTreat} setActiveTreat={setActiveTreat}
           setCell={setCell} fillM={fillM}
           saved={saved} editIdx={editIdx}
+          editFocus={editFocus}
           handleSave={handleSave}
           onCancel={() => setView("dashboard")}
         />
@@ -820,9 +1129,12 @@ export default function App() {
 // COMPONENTE: EntryView — Formulário de entrada de dados
 // Exibe grade N/A/M × R1-R12 por tratamento (selecionado via abas)
 // ══════════════════════════════════════════════════════════════════
-function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, handleSave, onCancel }) {
+function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
   const inputRefs = useRef({});
   const timersRef = useRef({});
+  const gridScrollRef = useRef(null);
+  const lastAutoFocusKeyRef = useRef("");
+  const rolos = getRolosForKind(countKind);
 
   useEffect(() => {
     return () => {
@@ -845,15 +1157,51 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
     return true;
   };
 
+  useEffect(() => {
+    const key = editIdx === null
+      ? ""
+      : `${editIdx}:${editFocus?.treatId || activeTreat}:${editFocus?.rolo || ""}:${editFocus?.tipo || ""}`;
+
+    if (!key) {
+      lastAutoFocusKeyRef.current = "";
+      return;
+    }
+    if (lastAutoFocusKeyRef.current === key) return;
+    lastAutoFocusKeyRef.current = key;
+
+    const targetTreat = editFocus?.treatId || activeTreat;
+    if (targetTreat && targetTreat !== activeTreat) return;
+
+    const rolo = editFocus?.rolo || rolos[rolos.length - 1];
+    const tipoPriority = editFocus?.tipo
+      ? [editFocus.tipo, ...TIPOS.filter(t => t !== editFocus.tipo)]
+      : ["M", "A", "N"];
+
+    setTimeout(() => {
+      for (const tipo of tipoPriority) {
+        const el = inputRefs.current[keyFor(rolo, tipo)];
+        if (el) {
+          el.scrollIntoView({ block: "nearest", inline: "center" });
+          el.focus();
+          if (typeof el.select === "function") el.select();
+          return;
+        }
+      }
+      if (gridScrollRef.current) {
+        gridScrollRef.current.scrollLeft = gridScrollRef.current.scrollWidth;
+      }
+    }, 0);
+  }, [editIdx, editFocus, activeTreat]);
+
   const nextCoords = (rolo, tipo) => {
-    const roloIdx = ROLOS.indexOf(rolo);
+    const roloIdx = rolos.indexOf(rolo);
     const tipoIdx = TIPOS.indexOf(tipo);
     if (roloIdx < 0 || tipoIdx < 0) return null;
 
     let nextRolo = rolo;
     let nextTipo = TIPOS[tipoIdx + 1];
     if (!nextTipo) {
-      nextRolo = ROLOS[roloIdx + 1];
+      nextRolo = rolos[roloIdx + 1];
       nextTipo = TIPOS[0];
     }
     if (!nextRolo || !nextTipo) return null;
@@ -861,14 +1209,14 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
   };
 
   const prevCoords = (rolo, tipo) => {
-    const roloIdx = ROLOS.indexOf(rolo);
+    const roloIdx = rolos.indexOf(rolo);
     const tipoIdx = TIPOS.indexOf(tipo);
     if (roloIdx < 0 || tipoIdx < 0) return null;
 
     let prevRolo = rolo;
     let prevTipo = TIPOS[tipoIdx - 1];
     if (!prevTipo) {
-      prevRolo = ROLOS[roloIdx - 1];
+      prevRolo = rolos[roloIdx - 1];
       prevTipo = TIPOS[TIPOS.length - 1];
     }
     if (!prevRolo || !prevTipo) return null;
@@ -969,6 +1317,39 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
             <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>DAT:</span>
             <span style={{ fontSize: 18, fontWeight: 700, color: UI.text, fontFamily: FONT_SANS }}>{dat || "—"}</span>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Tipo:</span>
+            <div style={{ display: "flex", border: `1px solid ${UI.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setCountKind("vigor")}
+                style={{
+                  background: countKind === "vigor" ? UI.accent : "transparent",
+                  color: countKind === "vigor" ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                Vigor
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setCountKind("germinacao")}
+                style={{
+                  background: countKind === "germinacao" ? UI.accent : "transparent",
+                  color: countKind === "germinacao" ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                Germinação
+              </button>
+            </div>
+          </div>
           <InfoTooltip text={INFO_TEXTS.ultimaContagem} />
         </div>
       </div>
@@ -977,8 +1358,8 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         {TREATMENTS.map(t => {
           // Conta rolos que já têm algum valor digitado
-          const filled = ROLOS.filter(r =>
-            grid[t.id][r].N !== "" || grid[t.id][r].A !== "" || grid[t.id][r].M !== ""
+          const filled = rolos.filter(r =>
+            grid[t.id]?.[r]?.N !== "" || grid[t.id]?.[r]?.A !== "" || grid[t.id]?.[r]?.M !== ""
           ).length;
           return (
             <button key={t.id} className="btn" onClick={() => setActiveTreat(t.id)} style={{
@@ -991,8 +1372,8 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
               <span style={{ fontFamily: FONT_SANS, fontWeight: 700, fontSize: 16, letterSpacing: 0.2 }}>{t.id}</span>
               <span style={{ marginLeft: 6, fontSize: 10, opacity: 0.7 }}>{t.name}</span>
               {/* Verde = completo, amarelo = incompleto */}
-              <span style={{ marginLeft: 8, fontSize: 10, color: filled === 12 ? "#6fa58b" : "#b69b6a" }}>
-                {filled}/12 rolos
+              <span style={{ marginLeft: 8, fontSize: 10, color: filled === rolos.length ? "#6fa58b" : "#b69b6a" }}>
+                {filled}/{rolos.length} rolos
               </span>
             </button>
           );
@@ -1002,7 +1383,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
       {/* Grade de entrada para o tratamento ativo */}
       {(() => {
         const t = TREATMENTS.find(x => x.id === activeTreat);
-        const sums = sumTreatment(grid, activeTreat);
+        const sums = sumTreatment(grid, activeTreat, rolos);
         return (
           <div style={card({ marginBottom: 20 })}>
             {/* Cabeçalho com totais em tempo real */}
@@ -1016,28 +1397,28 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
                     {tp}: {sums[tp]}
                   </span>
                 ))}
-                <span style={{ color: UI.textSoft }}>Total: {sums.total}/300</span>
+                <span style={{ color: UI.textSoft }}>Total: {sums.total}/{rolos.length * 25}</span>
               </div>
             </div>
 
-            <div className="entry-grid-scroll">
-              <div className="entry-grid-inner">
+            <div ref={gridScrollRef} className="entry-grid-scroll">
+              <div className="entry-grid-inner" style={{ minWidth: 70 + rolos.length * 52 }}>
                 {/* Linha de cabeçalho com nomes dos rolos */}
-                <div style={{ display: "grid", gridTemplateColumns: "70px repeat(12, 1fr)", gap: 6, marginBottom: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: `70px repeat(${rolos.length}, 1fr)`, gap: 6, marginBottom: 6 }}>
                   <div />
-                  {ROLOS.map(r => (
+                  {rolos.map(r => (
                     <div key={r} style={{ fontSize: 10, color: UI.textSoft, textAlign: "center", fontFamily: FONT_SANS }}>{r}</div>
                   ))}
                 </div>
 
                 {/* Uma linha por tipo: Normal, Anormal, Morta */}
                 {TIPOS.map(tipo => (
-                  <div key={tipo} style={{ display: "grid", gridTemplateColumns: "70px repeat(12, 1fr)", gap: 6, marginBottom: 6, alignItems: "center" }}>
+                  <div key={tipo} style={{ display: "grid", gridTemplateColumns: `70px repeat(${rolos.length}, 1fr)`, gap: 6, marginBottom: 6, alignItems: "center" }}>
                     <div style={{ fontSize: 14, color: TIPO_COLORS[tipo], fontFamily: FONT_SANS, fontWeight: 600, letterSpacing: 0.2, textAlign: "right", paddingRight: 8 }}>
                       {TIPO_LABELS[tipo]}
                     </div>
                     {/* Um input por rolo — borda colorida quando preenchido */}
-                    {ROLOS.map(r => (
+                    {rolos.map(r => (
                       <input
                         key={r}
                         ref={setInputRef(r, tipo)}
@@ -1046,22 +1427,22 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
                         pattern="[0-9]*"
                         maxLength={2}
                         className="cell-input"
-                        value={grid[activeTreat][r][tipo]}
+                        value={grid[activeTreat]?.[r]?.[tipo] ?? ""}
                         onChange={e => handleCellChange(r, tipo, e.target.value)}
                         onKeyDown={e => handleCellKeyDown(r, tipo, e)}
                         onFocus={(e) => e.target.select()}
-                        style={{ borderColor: grid[activeTreat][r][tipo] !== "" ? `${TIPO_COLORS[tipo]}66` : UI.border }}
+                        style={{ borderColor: (grid[activeTreat]?.[r]?.[tipo] ?? "") !== "" ? `${TIPO_COLORS[tipo]}66` : UI.border }}
                       />
                     ))}
                   </div>
                 ))}
 
                 {/* Linha de preenchimento automático: M = 25 - N - A */}
-                <div style={{ display: "grid", gridTemplateColumns: "70px repeat(12, 1fr)", gap: 6, marginTop: 4 }}>
+                <div style={{ display: "grid", gridTemplateColumns: `70px repeat(${rolos.length}, 1fr)`, gap: 6, marginTop: 4 }}>
                   <div style={{ fontSize: 9, color: UI.textSoft, textAlign: "right", paddingRight: 8, paddingTop: 6 }}>auto M ▼</div>
-                  {ROLOS.map(r => {
-                    const n = Number(grid[activeTreat][r].N || 0);
-                    const a = Number(grid[activeTreat][r].A || 0);
+                  {rolos.map(r => {
+                    const n = Number(grid[activeTreat]?.[r]?.N || 0);
+                    const a = Number(grid[activeTreat]?.[r]?.A || 0);
                     const rem = 25 - n - a; // Quantas sementes sobram para Mortas
                     return (
                       <button key={r} className="btn" onClick={() => fillM(r)}
@@ -1106,34 +1487,25 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, grid
 // ══════════════════════════════════════════════════════════════════
 // COMPONENTE: DashboardView — Painel analítico principal
 // ══════════════════════════════════════════════════════════════════
-function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
+function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureRows, setMoistureRows }) {
 
   // Tratamento selecionado para o gráfico de rolos
   const [selT, setSelT] = useState("T1");
-  const [moistureRows, setMoistureRows] = useState([
-    { id: "Rep 1", m1: "", m2: "", m3: "" },
-    { id: "Rep 2", m1: "", m2: "", m3: "" },
-  ]);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(MOISTURE_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length) setMoistureRows(parsed);
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(MOISTURE_STORAGE_KEY, JSON.stringify(moistureRows));
-    } catch {}
-  }, [moistureRows]);
+  const trendChartRef = useRef(null);
+  const distChartRef = useRef(null);
+  const roloChartRef = useRef(null);
 
   // Ordena por DAT crescente para os gráficos de linha
-  const sorted = [...counts].sort((a, b) => a.dat - b.dat);
-  const latest = sorted[sorted.length - 1]; // Contagem mais recente
-  const ivg = calcIVG(sorted);              // IVG calculado para todos os tratamentos
+  const sortedAll = [...counts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+  const groupedByDat = new Map();
+  sortedAll.forEach(c => {
+    const existing = groupedByDat.get(c.dat);
+    if (!existing || countKindOrder(c) > countKindOrder(existing)) groupedByDat.set(c.dat, c);
+  });
+  const sorted = Array.from(groupedByDat.values()).sort((a, b) => a.dat - b.dat);
+  const latest = sorted[sorted.length - 1];
+  const ivg = calcIVG(sorted);
+  const rolosLatest = latest ? getRolosForKind(getCountKind(latest)) : ROLOS_VIGOR;
 
   // ── PREPARAÇÃO DOS DADOS DOS GRÁFICOS ─────────────────────────
 
@@ -1141,7 +1513,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
   const trendData = sorted.map(c => {
     const row = { dat: c.dat };
     TREATMENTS.forEach(t => {
-      const s = sumTreatment(c.grid, t.id);
+      const s = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
       row[t.id] = s.total > 0 ? +((s.N / s.total) * 100).toFixed(1) : 0;
     });
     return row;
@@ -1149,7 +1521,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
 
   // BarChart comparativo da última contagem
   const latestBar = latest ? TREATMENTS.map(t => {
-    const s = sumTreatment(latest.grid, t.id);
+    const s = sumTreatment(latest.grid, t.id, rolosLatest);
     return {
       name: t.id,
       Normais:  s.total > 0 ? +((s.N / s.total) * 100).toFixed(1) : 0,
@@ -1159,7 +1531,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
   }) : [];
 
   // BarChart empilhado por rolo do tratamento selecionado
-  const roloData = latest ? ROLOS.map(r => ({
+  const roloData = latest ? rolosLatest.map(r => ({
     name: r,
     N: Number(latest.grid[selT]?.[r]?.N || 0),
     A: Number(latest.grid[selT]?.[r]?.A || 0),
@@ -1168,9 +1540,9 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
 
   // Determina qual tratamento tem maior % de normais na última contagem
   const bestT = latest ? TREATMENTS.reduce((best, t) => {
-    const s    = sumTreatment(latest.grid, t.id);
+    const s    = sumTreatment(latest.grid, t.id, rolosLatest);
     const pct  = s.total > 0 ? s.N / s.total : 0;
-    const bs   = sumTreatment(latest.grid, best.id);
+    const bs   = sumTreatment(latest.grid, best.id, rolosLatest);
     const bpct = bs.total > 0 ? bs.N / bs.total : 0;
     return pct > bpct ? t : best;
   }, TREATMENTS[0]) : null;
@@ -1202,6 +1574,14 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
       <p style={{ fontSize: 12, marginTop: 8 }}>Clique em "Nova Contagem" para começar.</p>
     </div>
   );
+
+  const exportPng = async (ref, baseName) => {
+    try {
+      await exportFirstSvgAsPng(ref?.current, `${baseName}.png`);
+    } catch (err) {
+      alert(err?.message || "Não foi possível exportar o PNG.");
+    }
+  };
 
   return (
     <div className="dashboard-layout">
@@ -1254,13 +1634,13 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
       <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
 
         {bestT && (() => {
-          const s = sumTreatment(latest.grid, bestT.id);
+          const s = sumTreatment(latest.grid, bestT.id, rolosLatest);
           const pct = s.total > 0 ? ((s.N / s.total) * 100).toFixed(1) : 0;
           return <KPIBlock label="MELHOR TRATAMENTO" val={bestT.id} sub={`${bestT.name} · ${pct}% normais`} color={bestT.color} tag="LÍDER" infoKey="melhorTratamento" />;
         })()}
 
         <KPIBlock label="ÚLTIMA CONTAGEM" val={`DAT ${latest.dat}`}
-          sub={formatPtBrDate(latest.countDate || latest.savedAt)}
+          sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "Vigor" : "Germinação"}`}
           color="#6f93b5" infoKey="ultimaContagem" />
 
         <KPIBlock label="TOTAL DE CONTAGENS" val={counts.length}
@@ -1324,8 +1704,25 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
       <div className="dashboard-charts">
 
         {/* Card: Gráfico de evolução por DAT */}
-        <div style={card()}>
-          <CardTitle emoji="📈" title="EVOLUÇÃO % NORMAIS POR DAT" infoKey="evolucao" />
+        <div ref={trendChartRef} style={card()}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+            <CardTitle emoji="📈" title="EVOLUÇÃO % NORMAIS POR DAT" infoKey="evolucao" extra={{ marginBottom: 0 }} />
+            <button
+              className="btn"
+              onClick={() => exportPng(trendChartRef, `evolucao_dat_${latest?.dat || "atual"}`)}
+              style={{
+                background: "transparent",
+                border: `1px solid ${UI.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: FONT_SANS,
+                color: UI.textSoft,
+              }}
+            >
+              📷 PNG
+            </button>
+          </div>
           {trendData.length < 2
             ? <p style={{ color: "#475569", fontSize: 12 }}>Adicione mais contagens para ver a evolução.</p>
             : <ResponsiveContainer width="100%" height={220}>
@@ -1350,8 +1747,25 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
         </div>
 
         {/* Card: Distribuição da última contagem */}
-        <div style={card()}>
-          <CardTitle emoji="📊" title={`DISTRIBUIÇÃO ATUAL (DAT ${latest?.dat})`} infoKey="distribuicao" />
+        <div ref={distChartRef} style={card()}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+            <CardTitle emoji="📊" title={`DISTRIBUIÇÃO ATUAL (DAT ${latest?.dat})`} infoKey="distribuicao" extra={{ marginBottom: 0 }} />
+            <button
+              className="btn"
+              onClick={() => exportPng(distChartRef, `distribuicao_dat_${latest?.dat || "atual"}`)}
+              style={{
+                background: "transparent",
+                border: `1px solid ${UI.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: FONT_SANS,
+                color: UI.textSoft,
+              }}
+            >
+              📷 PNG
+            </button>
+          </div>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={latestBar} barCategoryGap="30%">
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -1369,20 +1783,37 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
 
       {/* ── GRÁFICO DE VARIAÇÃO POR ROLO ─────────────────────────
           Barras empilhadas (stackId="a"): N + A + M = 25 por rolo */}
-      <div style={card({ marginBottom: 16 })}>
+      <div ref={roloChartRef} style={card({ marginBottom: 16 })}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <CardTitle emoji="🔬" title={`VARIAÇÃO POR ROLO — DAT ${latest?.dat}`} infoKey="variacaoRolo" extra={{ marginBottom: 0 }} />
           {/* Botões de seleção de tratamento */}
-          <div style={{ display: "flex", gap: 6 }}>
-            {TREATMENTS.map(t => (
-              <button key={t.id} className="btn" onClick={() => setSelT(t.id)} style={{
-                background: selT === t.id ? t.color : "transparent",
-                color: selT === t.id ? "#fff" : t.color,
-                border: `1px solid ${t.color}`,
-                borderRadius: 5, padding: "3px 10px", fontSize: 11,
-                fontFamily: FONT_SANS, cursor: "pointer",
-              }}>{t.id}</button>
-            ))}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 6 }}>
+              {TREATMENTS.map(t => (
+                <button key={t.id} className="btn" onClick={() => setSelT(t.id)} style={{
+                  background: selT === t.id ? t.color : "transparent",
+                  color: selT === t.id ? "#fff" : t.color,
+                  border: `1px solid ${t.color}`,
+                  borderRadius: 5, padding: "3px 10px", fontSize: 11,
+                  fontFamily: FONT_SANS, cursor: "pointer",
+                }}>{t.id}</button>
+              ))}
+            </div>
+            <button
+              className="btn"
+              onClick={() => exportPng(roloChartRef, `variacao_rolo_${selT}_dat_${latest?.dat || "atual"}`)}
+              style={{
+                background: "transparent",
+                border: `1px solid ${UI.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: FONT_SANS,
+                color: UI.textSoft,
+              }}
+            >
+              📷 PNG
+            </button>
           </div>
         </div>
         <ResponsiveContainer width="100%" height={160}>
@@ -1402,40 +1833,59 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar }) {
       {/* ── TABELA HISTÓRICA ─────────────────────────────────────── */}
       <div style={card()}>
         <CardTitle emoji="📋" title="HISTÓRICO DE CONTAGENS" infoKey="historico" />
-        {sorted.length === 0
+        {sortedAll.length === 0
           ? <p style={{ color: UI.textSoft, fontSize: 12 }}>Sem contagens.</p>
           : <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${UI.border}` }}>
-                    {["DAT","Data","T0 N%","T1 N%","T2 N%","T3 N%","Ações"].map(h => (
-                      <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>{h}</th>
-                    ))}
+                    <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>DAT</th>
+                    <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Data</th>
+                    <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Tipo</th>
+                    {TREATMENTS.flatMap(t =>
+                      ["N", "A", "M"].map(tipo => (
+                        <th
+                          key={`${t.id}-${tipo}`}
+                          style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}
+                        >
+                          {t.id} {tipo}%
+                        </th>
+                      ))
+                    )}
+                    <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Ações</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map((c, i) => (
-                    <tr key={i} style={{ borderBottom: "1px solid #e5e7eb" }}>
+                  {sortedAll.map((c, i) => (
+                    <tr key={`${c.dat}-${getCountKind(c)}-${i}`} style={{ borderBottom: "1px solid #e5e7eb" }}>
                       <td style={{ padding: "10px", fontFamily: FONT_SANS, fontWeight: 700, fontSize: 16, color: "#6f93b5", letterSpacing: 0.2 }}>{c.dat}</td>
                       <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
                         {formatPtBrDate(c.countDate || c.savedAt)}
                       </td>
-                      {/* % Normais de cada tratamento com mini barra de progresso */}
-                      {TREATMENTS.map(t => {
-                        const s = sumTreatment(c.grid, t.id);
-                        const pct = s.total > 0 ? ((s.N / s.total) * 100).toFixed(1) : "—";
-                        return (
-                          <td key={t.id} style={{ padding: "10px" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              {/* Barra de progresso proporcional ao % */}
-                              <div style={{ width: 40, height: 4, background: "#e5e7eb", borderRadius: 2 }}>
-                                <div style={{ width: `${pct}%`, height: "100%", background: t.color, borderRadius: 2 }} />
+                      <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
+                        {getCountKind(c) === "vigor" ? "Vigor" : "Germinação"}
+                      </td>
+                      {TREATMENTS.flatMap(t =>
+                        ["N", "A", "M"].map(tipo => {
+                          const s = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
+                          const val = Number(s[tipo] || 0);
+                          const pctStr = s.total > 0 ? ((val / s.total) * 100).toFixed(1) : "—";
+                          const pctNum = pctStr === "—" ? 0 : Number(pctStr);
+                          const color = TIPO_COLORS[tipo];
+                          return (
+                            <td key={`${t.id}-${tipo}`} style={{ padding: "10px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <div style={{ width: 40, height: 4, background: "#e5e7eb", borderRadius: 2 }}>
+                                  <div style={{ width: `${pctNum}%`, height: "100%", background: color, borderRadius: 2 }} />
+                                </div>
+                                <span style={{ fontFamily: FONT_SANS, fontSize: 11, color }}>
+                                  {pctStr}%
+                                </span>
                               </div>
-                              <span style={{ fontFamily: FONT_SANS, fontSize: 11, color: t.color }}>{pct}%</span>
-                            </div>
-                          </td>
-                        );
-                      })}
+                            </td>
+                          );
+                        })
+                      )}
                       <td style={{ padding: "10px" }}>
                         <div style={{ display: "flex", gap: 6 }}>
                           <button className="btn" onClick={() => startEdit(counts.indexOf(c))}

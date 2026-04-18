@@ -1,4 +1,6 @@
 import { defineConfig } from "vite";
+import fs from "node:fs/promises";
+import path from "node:path";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
@@ -8,9 +10,42 @@ export default defineConfig({
     host: true,
     port: 5173,
     strictPort: false,
-    https: true,
+    https: false,
   },
   plugins: [
+    {
+      name: "germinacao-autosave-json",
+      apply: "serve",
+      configureServer(server) {
+        server.middlewares.use(async (req, res, next) => {
+          if (req.method !== "POST" || !req.url || !req.url.startsWith("/__autosave")) return next();
+
+          try {
+            const chunks = [];
+            req.on("data", (c) => chunks.push(c));
+            req.on("end", async () => {
+              try {
+                const raw = Buffer.concat(chunks).toString("utf-8");
+                const payload = JSON.parse(raw || "{}");
+                const filePath = path.resolve(process.cwd(), "germinacao_bi_autosave.json");
+                await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8");
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "application/json; charset=utf-8");
+                res.end(JSON.stringify({ ok: true, file: "germinacao_bi_autosave.json" }));
+              } catch (err) {
+                res.statusCode = 400;
+                res.setHeader("Content-Type", "application/json; charset=utf-8");
+                res.end(JSON.stringify({ ok: false, error: err?.message || "Erro ao salvar." }));
+              }
+            });
+          } catch (err) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: err?.message || "Erro interno." }));
+          }
+        });
+      },
+    },
     basicSsl(),
     react(),
     VitePWA({
