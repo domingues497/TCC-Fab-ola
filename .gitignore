@@ -4,10 +4,5 @@ dist/
 
 *.log
 
-*.docx
-*.xlsx
-~$*.docx
-~$*.xlsx
-
 .env
 .env.*
