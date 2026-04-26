@@ -38,19 +38,22 @@ const TREATMENTS = [
 // Array com os rolos: ["R1", "R2", ...]
 // Array.from cria um array; o segundo argumento (_, i) ignora o valor
 // e usa o índice i para gerar o nome do rolo
-const ROLOS_VIGOR = Array.from({ length: 24 }, (_, i) => `R${i + 1}`);
-const ROLOS_GERMINACAO = Array.from({ length: 12 }, (_, i) => `R${i + 1}`);
-const ROLOS_SEM_VERMICULINA = Array.from({ length: 5 }, (_, i) => `R${i + 1}`);
-
-function getRolosForKind(kind) {
-  if (kind === "germinacao") return ROLOS_GERMINACAO;
-  if (kind === "sem_vermiculina") return ROLOS_SEM_VERMICULINA;
-  return ROLOS_VIGOR;
+function makeRolos(count) {
+  const n = Number(count);
+  const safe = Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+  return Array.from({ length: safe }, (_, i) => `R${i + 1}`);
 }
 
-function getSeedsPerRoloForKind(kind) {
-  if (kind === "sem_vermiculina") return 20;
-  return 25;
+function getTrialPreset(trialId, kind) {
+  if (trialId === "sem_vermiculita") return { rolosCount: 5, seedsPerRolo: 20 };
+  return { rolosCount: kind === "vigor" ? 24 : 12, seedsPerRolo: 25 };
+}
+
+function getRolosForCount(trialId, kind, rolosCountOverride) {
+  const preset = getTrialPreset(trialId, kind);
+  const n = Number(rolosCountOverride);
+  const rolosCount = Number.isFinite(n) && n > 0 ? Math.floor(n) : preset.rolosCount;
+  return makeRolos(rolosCount);
 }
 
 // Os 3 tipos de plântula contados em cada rolo
@@ -151,8 +154,26 @@ function countKindOrder(entryOrKind) {
   return k === "germinacao" ? 1 : 0;
 }
 
-function findFirstUnfilledCell(grid, kind) {
-  const rolos = getRolosForKind(kind);
+function getCountTrialId(entry) {
+  const t = entry?.trialId;
+  return typeof t === "string" && t ? t : "principal";
+}
+
+function getCountRolos(entry) {
+  const trialId = getCountTrialId(entry);
+  const kind = getCountKind(entry);
+  return getRolosForCount(trialId, kind, entry?.rolosCount);
+}
+
+function getCountSeedsPerRolo(entry) {
+  const trialId = getCountTrialId(entry);
+  const kind = getCountKind(entry);
+  const preset = getTrialPreset(trialId, kind);
+  const n = Number(entry?.seedsPerRolo);
+  return Number.isFinite(n) && n > 0 ? n : preset.seedsPerRolo;
+}
+
+function findFirstUnfilledCell(grid, rolos) {
   for (const t of TREATMENTS) {
     const tid = t.id;
     for (const r of rolos) {
@@ -404,8 +425,7 @@ const INFO_TEXTS = {
  * Usa string vazia "" em vez de 0 para distinguir "não preenchido" de "zero sementes".
  * Retorna: { T0: { R1: { N:"", A:"", M:"" }, R2: {...}, ... }, T1: {...}, ... }
  */
-function emptyGrid(kind = "vigor") {
-  const rolos = getRolosForKind(kind);
+function emptyGrid(rolos) {
   const g = {};
   TREATMENTS.forEach(t => {
     g[t.id] = {};
@@ -437,7 +457,7 @@ function ensureGridHasRolos(grid, rolos) {
  * O operador ?. evita erros se o rolo ainda não existir.
  * @returns {{ N, A, M, total }}
  */
-function sumTreatment(grid, tid, rolos = ROLOS_VIGOR) {
+function sumTreatment(grid, tid, rolos = makeRolos(12)) {
   let N = 0, A = 0, M = 0;
   rolos.forEach(r => {
     N += Number(grid[tid]?.[r]?.N || 0);
@@ -465,7 +485,7 @@ function calcIVG(counts) {
   TREATMENTS.forEach(t => {
     let sum = 0;
     unique.forEach(c => {
-      const { N } = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
+      const { N } = sumTreatment(c.grid, t.id, getCountRolos(c));
       if (c.dat > 0) sum += N / c.dat; // Normais dividido pelo DAT
     });
     ivg[t.id] = sum.toFixed(2); // 2 casas decimais
@@ -637,14 +657,22 @@ function KPIBlock({ label, val, sub, color, tag, small, infoKey }) {
 export default function App() {
 
   // ── ESTADO ──────────────────────────────────────────────────────
+  const initialTrialId = "principal";
+  const initialKind = "vigor";
+  const initialPreset = getTrialPreset(initialTrialId, initialKind);
+  const initialRolos = makeRolos(initialPreset.rolosCount);
+
   const [view, setView]               = useState("dashboard"); // Tela ativa
   const [counts, setCounts]           = useState([]);          // Array de contagens salvas
   const [loading, setLoading]         = useState(true);        // Carregamento inicial
   const [dat, setDat]                 = useState("");          // DAT do formulário
   const [day0, setDay0]               = useState("");          // Dia 0 do ensaio (data do tratamento)
   const [countDate, setCountDate]     = useState("");          // Data da contagem (yyyy-mm-dd)
-  const [countKind, setCountKind]     = useState("vigor");
-  const [grid, setGrid]               = useState(emptyGrid("vigor")); // Dados N/A/M do formulário
+  const [countKind, setCountKind]     = useState(initialKind);
+  const [countTrialId, setCountTrialId] = useState(initialTrialId);
+  const [countRolosCount, setCountRolosCount] = useState(initialPreset.rolosCount);
+  const [countSeedsPerRolo, setCountSeedsPerRolo] = useState(initialPreset.seedsPerRolo);
+  const [grid, setGrid]               = useState(emptyGrid(initialRolos)); // Dados N/A/M do formulário
   const [activeTreat, setActiveTreat] = useState("T0");        // Aba ativa no formulário
   const [saved, setSaved]             = useState(false);       // Animação de confirmação
   const [editIdx, setEditIdx]         = useState(null);        // null = novo, número = edição
@@ -758,9 +786,16 @@ export default function App() {
   }, [day0, countDate, editIdx]);
 
   useEffect(() => {
-    const rolos = getRolosForKind(countKind);
+    if (editIdx !== null) return;
+    const preset = getTrialPreset(countTrialId, countKind);
+    setCountRolosCount(preset.rolosCount);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
+  }, [countTrialId, countKind, editIdx]);
+
+  useEffect(() => {
+    const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
     setGrid(prev => ensureGridHasRolos(prev, rolos));
-  }, [countKind]);
+  }, [countTrialId, countKind, countRolosCount]);
 
   useEffect(() => {
     countsRef.current = counts;
@@ -880,13 +915,26 @@ export default function App() {
     const d = calcDat(day0, countDate);
     if (d === null) return alert("Informe datas válidas para Dia 0 e para a contagem.");
     if (d < 0) return alert("A data da contagem não pode ser anterior ao Dia 0.");
-    const entry = { dat: d, grid, countDate, kind: countKind, savedAt: new Date().toISOString() };
+    const entry = {
+      dat: d,
+      grid,
+      countDate,
+      kind: countKind,
+      trialId: countTrialId,
+      rolosCount: countRolosCount,
+      seedsPerRolo: countSeedsPerRolo,
+      savedAt: new Date().toISOString(),
+    };
     let next;
     if (editIdx !== null) {
       // Edição: substitui o item no índice editIdx
       next = counts.map((c, i) => i === editIdx ? entry : c);
     } else {
-      const exists = counts.findIndex(c => c.dat === d && getCountKind(c) === countKind);
+      const exists = counts.findIndex(c =>
+        c.dat === d &&
+        getCountKind(c) === countKind &&
+        getCountTrialId(c) === countTrialId
+      );
       if (exists >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "Vigor" : "Germinação"}). Substituir?`)) return;
       next = exists >= 0
         ? counts.map((c, i) => i === exists ? entry : c)
@@ -902,12 +950,19 @@ export default function App() {
     const c = counts[idx];
     setDat(String(c.dat));
     setCountDate(String((c.countDate || c.savedAt || "").slice(0, 10)));
-    setCountKind(getCountKind(c));
+    const nextKind = getCountKind(c);
+    const nextTrialId = getCountTrialId(c);
+    const rolos = getCountRolos(c);
+    const seeds = getCountSeedsPerRolo(c);
+    setCountKind(nextKind);
+    setCountTrialId(nextTrialId);
+    setCountRolosCount(rolos.length);
+    setCountSeedsPerRolo(seeds);
     const copied = JSON.parse(JSON.stringify(c.grid));
-    setGrid(ensureGridHasRolos(copied, getRolosForKind(getCountKind(c))));
+    setGrid(ensureGridHasRolos(copied, rolos));
     setEditIdx(idx);
     setView("entry");
-    const focus = findFirstUnfilledCell(c.grid, getCountKind(c));
+    const focus = findFirstUnfilledCell(c.grid, rolos);
     setEditFocus(focus);
     setActiveTreat(focus?.treatId || "T0");
   };
@@ -926,7 +981,10 @@ export default function App() {
     const dd = String(today.getDate()).padStart(2, "0");
     setCountDate(`${yyyy}-${mm}-${dd}`);
     setCountKind("vigor");
-    setDat(""); setGrid(emptyGrid("vigor")); setEditIdx(null);
+    const preset = getTrialPreset(countTrialId, "vigor");
+    setCountRolosCount(preset.rolosCount);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
+    setDat(""); setGrid(emptyGrid(makeRolos(preset.rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
@@ -934,7 +992,10 @@ export default function App() {
   const startNewAtDate = (isoDate) => {
     setCountDate(isoDate);
     setCountKind("vigor");
-    setDat(""); setGrid(emptyGrid("vigor")); setEditIdx(null);
+    const preset = getTrialPreset(countTrialId, "vigor");
+    setCountRolosCount(preset.rolosCount);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
+    setDat(""); setGrid(emptyGrid(makeRolos(preset.rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
@@ -954,9 +1015,9 @@ export default function App() {
   // ── PREENCHER MORTAS AUTOMATICAMENTE ────────────────────────────
   // M = 25 - N - A (cada rolo tem 25 sementes)
   const fillM = (rolo) => {
-    const n = Number(grid[activeTreat][rolo].N || 0);
-    const a = Number(grid[activeTreat][rolo].A || 0);
-    const m = 25 - n - a;
+    const n = Number(grid[activeTreat]?.[rolo]?.N || 0);
+    const a = Number(grid[activeTreat]?.[rolo]?.A || 0);
+    const m = Number(countSeedsPerRolo || 0) - n - a;
     if (m >= 0) setCell(rolo, "M", m);
   };
 
@@ -1096,6 +1157,9 @@ export default function App() {
         <EntryView
           dat={dat} setDat={setDat} day0={day0} openTrial={() => setShowTrial(true)} countDate={countDate} setCountDate={setCountDate} grid={grid}
           countKind={countKind} setCountKind={setCountKind}
+          countTrialId={countTrialId} setCountTrialId={setCountTrialId}
+          countRolosCount={countRolosCount} setCountRolosCount={setCountRolosCount}
+          countSeedsPerRolo={countSeedsPerRolo} setCountSeedsPerRolo={setCountSeedsPerRolo}
           activeTreat={activeTreat} setActiveTreat={setActiveTreat}
           setCell={setCell} fillM={fillM}
           saved={saved} editIdx={editIdx}
@@ -1129,12 +1193,13 @@ export default function App() {
 // COMPONENTE: EntryView — Formulário de entrada de dados
 // Exibe grade N/A/M × R1-R12 por tratamento (selecionado via abas)
 // ══════════════════════════════════════════════════════════════════
-function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
+function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
   const inputRefs = useRef({});
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
   const lastAutoFocusKeyRef = useRef("");
-  const rolos = getRolosForKind(countKind);
+  const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
+  const seedsPerRolo = Number(countSeedsPerRolo || 0) || getTrialPreset(countTrialId, countKind).seedsPerRolo;
 
   useEffect(() => {
     return () => {
@@ -1263,7 +1328,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     let num = Number(digits);
     if (!Number.isFinite(num)) return;
     if (num < 0) num = 0;
-    if (num > 25) num = 25;
+    if (num > seedsPerRolo) num = seedsPerRolo;
 
     setCell(rolo, tipo, String(num));
 
@@ -1323,7 +1388,13 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => setCountKind("vigor")}
+                onClick={() => {
+                  const nextKind = "vigor";
+                  setCountKind(nextKind);
+                  const preset = getTrialPreset(countTrialId, nextKind);
+                  setCountRolosCount(preset.rolosCount);
+                  setCountSeedsPerRolo(preset.seedsPerRolo);
+                }}
                 style={{
                   background: countKind === "vigor" ? UI.accent : "transparent",
                   color: countKind === "vigor" ? "#fff" : UI.textSoft,
@@ -1337,7 +1408,13 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => setCountKind("germinacao")}
+                onClick={() => {
+                  const nextKind = "germinacao";
+                  setCountKind(nextKind);
+                  const preset = getTrialPreset(countTrialId, nextKind);
+                  setCountRolosCount(preset.rolosCount);
+                  setCountSeedsPerRolo(preset.seedsPerRolo);
+                }}
                 style={{
                   background: countKind === "germinacao" ? UI.accent : "transparent",
                   color: countKind === "germinacao" ? "#fff" : UI.textSoft,
@@ -1347,6 +1424,51 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                 }}
               >
                 Germinação
+              </button>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Ensaio:</span>
+            <div style={{ display: "flex", border: `1px solid ${UI.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const nextTrialId = "principal";
+                  setCountTrialId(nextTrialId);
+                  const preset = getTrialPreset(nextTrialId, countKind);
+                  setCountRolosCount(preset.rolosCount);
+                  setCountSeedsPerRolo(preset.seedsPerRolo);
+                }}
+                style={{
+                  background: countTrialId === "principal" ? UI.accent : "transparent",
+                  color: countTrialId === "principal" ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                Principal
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const nextTrialId = "sem_vermiculita";
+                  setCountTrialId(nextTrialId);
+                  const preset = getTrialPreset(nextTrialId, countKind);
+                  setCountRolosCount(preset.rolosCount);
+                  setCountSeedsPerRolo(preset.seedsPerRolo);
+                }}
+                style={{
+                  background: countTrialId === "sem_vermiculita" ? UI.accent : "transparent",
+                  color: countTrialId === "sem_vermiculita" ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                Sem vermiculita
               </button>
             </div>
           </div>
@@ -1389,7 +1511,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
             {/* Cabeçalho com totais em tempo real */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
               <h3 style={{ fontFamily: FONT_SANS, fontSize: 11, color: UI.textSoft, letterSpacing: 0.3 }}>
-                ROLO-PAPEL · {t.name.toUpperCase()} · 25 sementes/rolo
+                ROLO-PAPEL · {t.name.toUpperCase()} · {seedsPerRolo} sementes/rolo
               </h3>
               <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
                 {["N","A","M"].map(tp => (
@@ -1443,10 +1565,10 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                   {rolos.map(r => {
                     const n = Number(grid[activeTreat]?.[r]?.N || 0);
                     const a = Number(grid[activeTreat]?.[r]?.A || 0);
-                    const rem = 25 - n - a; // Quantas sementes sobram para Mortas
+                    const rem = seedsPerRolo - n - a;
                     return (
                       <button key={r} className="btn" onClick={() => fillM(r)}
-                        title="Preencher Mortas = 25 - N - A"
+                        title={`Preencher Mortas = ${seedsPerRolo} - N - A`}
                         style={{
                           background: "transparent", border: `1px dashed ${UI.border}`,
                           borderRadius: 5,
@@ -1505,7 +1627,8 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
   const sorted = Array.from(groupedByDat.values()).sort((a, b) => a.dat - b.dat);
   const latest = sorted[sorted.length - 1];
   const ivg = calcIVG(sorted);
-  const rolosLatest = latest ? getRolosForKind(getCountKind(latest)) : ROLOS_VIGOR;
+  const rolosLatest = latest ? getCountRolos(latest) : makeRolos(12);
+  const seedsLatest = latest ? getCountSeedsPerRolo(latest) : 25;
 
   // ── PREPARAÇÃO DOS DADOS DOS GRÁFICOS ─────────────────────────
 
@@ -1513,7 +1636,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
   const trendData = sorted.map(c => {
     const row = { dat: c.dat };
     TREATMENTS.forEach(t => {
-      const s = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
+      const s = sumTreatment(c.grid, t.id, getCountRolos(c));
       row[t.id] = s.total > 0 ? +((s.N / s.total) * 100).toFixed(1) : 0;
     });
     return row;
@@ -1821,7 +1944,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
           <BarChart data={roloData} barCategoryGap="20%">
             <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
             <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 9, fontFamily: FONT_SANS }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fill: "#6b7280", fontSize: 9 }} domain={[0, 25]} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fill: "#6b7280", fontSize: 9 }} domain={[0, seedsLatest]} axisLine={false} tickLine={false} />
             <Tooltip contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, fontSize: 11 }} />
             <Bar dataKey="N" name="Normais"  fill="#6fa58b" radius={[3,3,0,0]} stackId="a" />
             <Bar dataKey="A" name="Anormais" fill="#b69b6a" radius={[0,0,0,0]} stackId="a" />
@@ -1867,7 +1990,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
                       </td>
                       {TREATMENTS.flatMap(t =>
                         ["N", "A", "M"].map(tipo => {
-                          const s = sumTreatment(c.grid, t.id, getRolosForKind(getCountKind(c)));
+                          const s = sumTreatment(c.grid, t.id, getCountRolos(c));
                           const val = Number(s[tipo] || 0);
                           const pctStr = s.total > 0 ? ((val / s.total) * 100).toFixed(1) : "—";
                           const pctNum = pctStr === "—" ? 0 : Number(pctStr);
