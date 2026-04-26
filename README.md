@@ -171,9 +171,9 @@ Regras:
 
 - RNF01: Interface responsiva (desktop/tablet/celular).
 - RNF02: Funcionamento offline parcial (fallback para `localStorage` + PWA).
-- RNF03: Persistência local sem exigir banco de dados/servidor de backend para uso básico.
+- RNF03: Persistência em nuvem via Supabase, com fallback local para uso offline.
 - RNF04: Dados exportáveis (JSON/PNG) para auditoria e backup.
-- RNF05: Segurança: não armazenar segredos/credenciais; tudo local.
+- RNF05: Segurança: não commitar segredos; variáveis de ambiente em `.env.local`.
 - RNF06: Robustez: falhas em APIs de storage não podem impedir o uso (uso de fallback).
 - RNF07: Usabilidade: navegação por teclado na grade (Enter/Tab) e foco automático no ponto pendente ao editar.
 
@@ -185,15 +185,54 @@ Regras:
   - Tenta `window.storage` (quando disponível)
   - Fallback para `localStorage`
 
-### 2) Autosave na raiz do projeto (desenvolvimento)
+### 2) Supabase (opcional) — sincronização em nuvem
 
-Quando o servidor de desenvolvimento está rodando, o app envia autosaves para o endpoint interno:
+O projeto salva os dados no Supabase (Postgres) em tabelas próprias. O campo `device_id` é usado como **Código do Ensaio** (chave de partição): basta usar o mesmo código em vários dispositivos para todos acessarem o mesmo conjunto de dados.
 
-- `POST /__autosave`
+1) Configure as variáveis de ambiente (não comite):
 
-O Vite grava/atualiza o arquivo na raiz do projeto:
+Crie um arquivo `.env.local` na raiz do projeto, baseado em [.env.example](.env.example):
 
-- `germinacao_bi_autosave.json`
+```bash
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
+2) Inicialize o Supabase no projeto (CLI):
+
+```bash
+supabase login
+supabase init
+supabase link --project-ref <seu_project_ref>
+```
+
+3) Crie as tabelas (migração)
+
+Este repositório já possui uma migração pronta:
+
+- [supabase/migrations](supabase/migrations)
+
+Para aplicar no Supabase:
+
+```bash
+supabase db push
+```
+
+Tabelas criadas:
+
+- `public.germinacao_meta` (Dia 0 por código do ensaio)
+- `public.germinacao_counts` (contagens por DAT/Tipo/Ensaio)
+- `public.germinacao_moisture` (umidade por replicata)
+
+4) Políticas (RLS)
+
+Para uso rápido em laboratório, você pode manter RLS desativado nessas tabelas, ou criar políticas específicas.
+Se você pretende acessar pela internet aberta, implemente autenticação e políticas com RLS.
+
+Com isso, o app:
+
+- tenta carregar do Supabase ao iniciar (para o **Código do Ensaio** configurado)
+- salva automaticamente no Supabase ao salvar/editar/excluir contagens, alterar o Dia 0 e atualizar umidade
 
 ### 3) Export/Import JSON (download/upload)
 
@@ -221,4 +260,3 @@ npx vite --host --port 5181 --strictPort
 
 Este projeto está configurado para rodar com **HTTP** no dev (para compatibilidade com preview local).
 Se você ativar HTTPS, alguns ambientes podem acusar erro de SSL.
-
