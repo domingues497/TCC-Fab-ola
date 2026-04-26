@@ -66,31 +66,34 @@ const TIPO_LABELS = { N: "Normal", A: "Anormal", M: "Morta" };
 // Cores semânticas: verde = saudável, amarelo = atenção, vermelho = problema
 const TIPO_COLORS = { N: "#6fa58b", A: "#b69b6a", M: "#c47b6a" };
 
-// Chave usada para identificar os dados no storage persistente
-const STORAGE_KEY = "germination_counts_v2";
-const META_KEY = "germination_trial_meta_v1";
-const MOISTURE_STORAGE_KEY = "germination_moisture_v1";
+const WORKSPACE_CODE_KEY = "germinacao_device_id_v1";
 const SUPABASE_META_TABLE = "germinacao_meta";
 const SUPABASE_COUNTS_TABLE = "germinacao_counts";
 const SUPABASE_MOISTURE_TABLE = "germinacao_moisture";
-const DEVICE_ID_KEY = "germinacao_device_id_v1";
 
-function scopedKey(base, scope) {
-  return `${base}__${scope || "default"}`;
+function getStoredWorkspaceCode() {
+  try {
+    return String(localStorage.getItem(WORKSPACE_CODE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
 }
 
-function getDeviceId() {
+function clearLegacyLocalData() {
   try {
-    const existing = localStorage.getItem(DEVICE_ID_KEY);
-    if (existing) return existing;
-    const id = typeof crypto?.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    localStorage.setItem(DEVICE_ID_KEY, id);
-    return id;
-  } catch {
-    return "default";
-  }
+    const prefixes = [
+      "germination_counts_v2",
+      "germination_trial_meta_v1",
+      "germination_moisture_v1",
+    ];
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (prefixes.some((p) => k.startsWith(p) || k.includes(`${p}__`))) keys.push(k);
+    }
+    keys.forEach((k) => localStorage.removeItem(k));
+  } catch {}
 }
 
 async function loadSupabaseMeta(deviceId) {
@@ -197,36 +200,6 @@ async function upsertSupabaseMoistureRows(deviceId, rows) {
   await supabase
     .from(SUPABASE_MOISTURE_TABLE)
     .upsert(payload, { onConflict: "device_id,trial_code,rep_label" });
-}
-
-function readLocalBackup(scope) {
-  try {
-    const raw = localStorage.getItem(scopedKey(`${STORAGE_KEY}_offline_backup`, scope));
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLocalBackup(scope, data) {
-  try {
-    localStorage.setItem(scopedKey(`${STORAGE_KEY}_offline_backup`, scope), JSON.stringify(data));
-  } catch {}
-}
-
-function readLocalMeta(scope) {
-  try {
-    const raw = localStorage.getItem(scopedKey(`${META_KEY}_offline_backup`, scope));
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLocalMeta(scope, data) {
-  try {
-    localStorage.setItem(scopedKey(`${META_KEY}_offline_backup`, scope), JSON.stringify(data));
-  } catch {}
 }
 
 function parseDateInput(value) {
@@ -385,18 +358,6 @@ async function exportFirstSvgAsPng(containerEl, fileName, opts = {}) {
   }
 }
 
-function downloadJsonFile(data, fileName) {
-  const json = JSON.stringify(data, null, 2);
-  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = sanitizeFileName(fileName);
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
 
 const CALENDAR_EVENTS = [
   { dm: "11/04", title: "Início dos testes", detail: "Montagem dos rolos de germinação e caixas gerbox (08:00–12:00)." },
@@ -773,7 +734,7 @@ function KPIBlock({ label, val, sub, color, tag, small, infoKey }) {
 export default function App() {
 
   // ── ESTADO ──────────────────────────────────────────────────────
-  const [workspaceCode, setWorkspaceCode] = useState(getDeviceId());
+  const [workspaceCode, setWorkspaceCode] = useState(getStoredWorkspaceCode());
   const workspaceCodeRef = useRef(workspaceCode);
   const initialTrialId = "principal";
   const initialKind = "vigor";
@@ -797,7 +758,6 @@ export default function App() {
   const [showTrial, setShowTrial]     = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const countsRef                     = useRef([]);
-  const importJsonInputRef            = useRef(null);
   const supabaseMetaTimerRef          = useRef(null);
   const supabaseMetaSignatureRef      = useRef("");
   const supabaseMoistureTimerRef      = useRef(null);
@@ -810,10 +770,8 @@ export default function App() {
 
   // ── PERSISTIR DADOS ──────────────────────────────────────────────
   // useCallback evita recriar a função a cada render
-  const persist = useCallback(async (next) => {
-    setCounts(next); // Atualiza UI imediatamente
-    writeLocalBackup(workspaceCodeRef.current, next);
-    try { await window.storage.set(scopedKey(STORAGE_KEY, workspaceCodeRef.current), JSON.stringify(next)); } catch {}
+  const persist = useCallback((next) => {
+    setCounts(next);
   }, []);
 
   useEffect(() => {
@@ -824,104 +782,37 @@ export default function App() {
   // useEffect com [] executa UMA vez ao montar o componente
   useEffect(() => {
     (async () => {
-      try {
-        const deviceId = workspaceCode;
-        const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
-          loadSupabaseMeta(deviceId),
-          loadSupabaseCounts(deviceId),
-          loadSupabaseMoisture(deviceId),
+      clearLegacyLocalData();
+      const deviceId = workspaceCode;
+      if (!deviceId) {
+        setCounts([]);
+        setDay0("");
+        setMoistureRows([
+          { id: "Rep 1", m1: "", m2: "", m3: "" },
+          { id: "Rep 2", m1: "", m2: "", m3: "" },
+        ]);
+        setLoading(false);
+        return;
+      }
+
+      const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
+        loadSupabaseMeta(deviceId),
+        loadSupabaseCounts(deviceId),
+        loadSupabaseMoisture(deviceId),
+      ]);
+
+      setDay0(remoteDay0 || "");
+      setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
+      setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
+        ? remoteMoisture
+        : [
+          { id: "Rep 1", m1: "", m2: "", m3: "" },
+          { id: "Rep 2", m1: "", m2: "", m3: "" },
         ]);
 
-        if (remoteDay0) {
-          setDay0(remoteDay0);
-          writeLocalMeta(deviceId, { day0: remoteDay0 });
-        }
-        if (Array.isArray(remoteCounts) && remoteCounts.length) {
-          setCounts(remoteCounts);
-          writeLocalBackup(deviceId, remoteCounts);
-          try { await window.storage.set(scopedKey(STORAGE_KEY, deviceId), JSON.stringify(remoteCounts)); } catch {}
-        }
-        if (Array.isArray(remoteMoisture) && remoteMoisture.length) {
-          setMoistureRows(remoteMoisture);
-          try { localStorage.setItem(scopedKey(MOISTURE_STORAGE_KEY, deviceId), JSON.stringify(remoteMoisture)); } catch {}
-        }
-        if (remoteDay0 || (remoteCounts && remoteCounts.length) || (remoteMoisture && remoteMoisture.length)) {
-          setLoading(false);
-          return;
-        }
-
-        try {
-          const metaRes = await window.storage.get(scopedKey(META_KEY, deviceId));
-          if (metaRes?.value) {
-            const meta = JSON.parse(metaRes.value);
-            if (meta?.day0) setDay0(meta.day0);
-            writeLocalMeta(deviceId, meta);
-          } else {
-            const localMeta = readLocalMeta(deviceId);
-            if (localMeta?.day0) setDay0(localMeta.day0);
-          }
-        } catch {
-          const localMeta = readLocalMeta(deviceId);
-          if (localMeta?.day0) setDay0(localMeta.day0);
-        }
-
-        const res = await window.storage.get(scopedKey(STORAGE_KEY, deviceId));
-        if (res?.value) {
-          const parsed = JSON.parse(res.value);
-          setCounts(parsed); // Restaura dados salvos
-          writeLocalBackup(deviceId, parsed);
-        } else {
-          const local = readLocalBackup(deviceId);
-          if (local?.length) {
-            setCounts(local);
-          } else {
-            // Sem dados: usa DAT 5 como ponto de partida
-            const seed = [{ dat: 5, grid: INITIAL_DAT5, savedAt: new Date().toISOString() }];
-            setCounts(seed);
-            writeLocalBackup(deviceId, seed);
-            await window.storage.set(scopedKey(STORAGE_KEY, deviceId), JSON.stringify(seed));
-          }
-        }
-      } catch {
-        // Se storage remoto falhar (offline), tenta backup local recente
-        const local = readLocalBackup(workspaceCode);
-        if (local?.length) {
-          setCounts(local);
-        } else {
-          // Sem backup local, mantém seed inicial
-          const seed = [{ dat: 5, grid: INITIAL_DAT5, savedAt: new Date().toISOString() }];
-          setCounts(seed);
-          writeLocalBackup(workspaceCode, seed);
-        }
-      }
       setLoading(false);
     })();
   }, [workspaceCode]);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(scopedKey(MOISTURE_STORAGE_KEY, workspaceCode));
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length) setMoistureRows(parsed);
-    } catch {}
-  }, [workspaceCode]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(scopedKey(MOISTURE_STORAGE_KEY, workspaceCodeRef.current), JSON.stringify(moistureRows));
-    } catch {}
-  }, [moistureRows]);
-
-  useEffect(() => {
-    const meta = { day0 };
-    writeLocalMeta(workspaceCodeRef.current, meta);
-    (async () => {
-      try {
-        await window.storage.set(scopedKey(META_KEY, workspaceCodeRef.current), JSON.stringify(meta));
-      } catch {}
-    })();
-  }, [day0]);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -998,20 +889,14 @@ export default function App() {
           loadSupabaseCounts(deviceId),
           loadSupabaseMoisture(deviceId),
         ]);
-        if (remoteDay0) {
-          setDay0(remoteDay0);
-          writeLocalMeta(deviceId, { day0: remoteDay0 });
-          try { await window.storage.set(scopedKey(META_KEY, deviceId), JSON.stringify({ day0: remoteDay0 })); } catch {}
-        }
-        if (Array.isArray(remoteCounts)) {
-          setCounts(remoteCounts);
-          writeLocalBackup(deviceId, remoteCounts);
-          try { await window.storage.set(scopedKey(STORAGE_KEY, deviceId), JSON.stringify(remoteCounts)); } catch {}
-        }
-        if (Array.isArray(remoteMoisture)) {
-          setMoistureRows(remoteMoisture);
-          try { localStorage.setItem(scopedKey(MOISTURE_STORAGE_KEY, deviceId), JSON.stringify(remoteMoisture)); } catch {}
-        }
+        setDay0(remoteDay0 || "");
+        setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
+        setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
+          ? remoteMoisture
+          : [
+            { id: "Rep 1", m1: "", m2: "", m3: "" },
+            { id: "Rep 2", m1: "", m2: "", m3: "" },
+          ]);
       }, 350);
     };
 
@@ -1042,25 +927,14 @@ export default function App() {
         return { ...c, dat: d };
       })
       .sort((a, b) => a.dat - b.dat);
-    if (changed) persist(next);
-  }, [day0, persist]);
+    if (!changed) return;
+    persist(next);
+    (async () => {
+      const deviceId = workspaceCodeRef.current;
+      if (!deviceId) return;
+      if (!isSupabaseConfigured || !supabase) return;
 
-  useEffect(() => {
-    if (!loading && !day0) setShowTrial(true);
-  }, [loading, day0]);
-
-  const syncAllToSupabase = async ({ nextDay0, nextCounts, nextMoistureRows }) => {
-    if (!isSupabaseConfigured || !supabase) return;
-    const deviceId = workspaceCodeRef.current;
-
-    await saveSupabaseMeta(deviceId, typeof nextDay0 === "string" ? nextDay0 : null);
-
-    if (Array.isArray(nextMoistureRows)) {
-      await upsertSupabaseMoistureRows(deviceId, nextMoistureRows);
-    }
-
-    if (Array.isArray(nextCounts)) {
-      const rows = nextCounts.map((c) => ({
+      const rows = next.map((c) => ({
         device_id: deviceId,
         trial_code: getCountTrialId(c),
         kind: getCountKind(c),
@@ -1097,57 +971,12 @@ export default function App() {
             .eq("dat", ex.dat);
         }
       }
-    }
-  };
+    })();
+  }, [day0, persist]);
 
-  const exportAllJson = () => {
-    const payload = {
-      schema: "germinacao_bi_export_v1",
-      exportedAt: new Date().toISOString(),
-      meta: { day0 },
-      counts,
-      moistureRows,
-    };
-    const stamp = new Date().toISOString().slice(0, 10);
-    downloadJsonFile(payload, `germinacao_bi_${stamp}.json`);
-  };
-
-  const requestImportJson = () => {
-    const el = importJsonInputRef.current;
-    if (!el) return;
-    el.value = "";
-    el.click();
-  };
-
-  const applyImportedData = async (payload) => {
-    const nextCounts = Array.isArray(payload?.counts) ? payload.counts : null;
-    if (!nextCounts) throw new Error("Arquivo inválido: campo 'counts' não encontrado.");
-    const nextDay0 = payload?.meta?.day0;
-    const nextMoistureRows = Array.isArray(payload?.moistureRows) ? payload.moistureRows : null;
-
-    if (!window.confirm("Importar este arquivo vai substituir os dados atuais. Continuar?")) return;
-
-    if (typeof nextDay0 === "string") setDay0(nextDay0);
-    if (nextMoistureRows) setMoistureRows(nextMoistureRows);
-
-    await persist(nextCounts);
-    await syncAllToSupabase({ nextDay0, nextCounts, nextMoistureRows });
-    setView("dashboard");
-    setEditIdx(null);
-    alert("Importação concluída.");
-  };
-
-  const handleImportJsonChange = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const payload = JSON.parse(text);
-      await applyImportedData(payload);
-    } catch (err) {
-      alert(err?.message || "Não foi possível importar o arquivo.");
-    }
-  };
+  useEffect(() => {
+    if (!loading && (!workspaceCode || !day0)) setShowTrial(true);
+  }, [loading, day0, workspaceCode]);
 
   // ── SALVAR CONTAGEM ──────────────────────────────────────────────
   const handleSave = async () => {
@@ -1167,6 +996,7 @@ export default function App() {
       savedAt: new Date().toISOString(),
     };
     let next;
+    const previous = editIdx !== null ? counts[editIdx] : null;
     if (editIdx !== null) {
       // Edição: substitui o item no índice editIdx
       next = counts.map((c, i) => i === editIdx ? entry : c);
@@ -1182,6 +1012,13 @@ export default function App() {
         : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b))); // Mantém ordem crescente
     }
     await persist(next);
+    if (previous) {
+      const changedKey =
+        Number(previous.dat) !== Number(entry.dat) ||
+        getCountKind(previous) !== getCountKind(entry) ||
+        getCountTrialId(previous) !== getCountTrialId(entry);
+      if (changedKey) await deleteSupabaseCount(workspaceCodeRef.current, previous);
+    }
     await upsertSupabaseCount(workspaceCodeRef.current, entry);
     setSaved(true);
     setTimeout(() => { setSaved(false); setView("dashboard"); setEditIdx(null); }, 1200);
@@ -1215,6 +1052,16 @@ export default function App() {
     const entry = counts[idx];
     await persist(counts.filter((_, i) => i !== idx));
     if (entry) await deleteSupabaseCount(workspaceCodeRef.current, entry);
+  };
+
+  const clearWorkspaceData = async (deviceId) => {
+    if (!isSupabaseConfigured || !supabase) throw new Error("Supabase não configurado.");
+    const id = String(deviceId || "").trim();
+    if (!id) throw new Error("Código inválido.");
+
+    await supabase.from(SUPABASE_COUNTS_TABLE).delete().eq("device_id", id);
+    await supabase.from(SUPABASE_MOISTURE_TABLE).delete().eq("device_id", id);
+    await supabase.from(SUPABASE_META_TABLE).delete().eq("device_id", id);
   };
 
   // ── NOVA CONTAGEM ────────────────────────────────────────────────
@@ -1264,6 +1111,17 @@ export default function App() {
     const m = Number(countSeedsPerRolo || 0) - n - a;
     if (m >= 0) setCell(rolo, "M", m);
   };
+
+  if (!isSupabaseConfigured || !supabase) return (
+    <div style={{ background: UI.bg, color: UI.text, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_SANS, padding: 24 }}>
+      <div style={{ maxWidth: 560, background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Supabase não configurado</div>
+        <div style={{ fontSize: 13, color: UI.textSoft }}>
+          Configure as variáveis de ambiente no Vercel: VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.
+        </div>
+      </div>
+    </div>
+  );
 
   // ── TELA DE CARREGAMENTO ─────────────────────────────────────────
   if (loading) return (
@@ -1355,33 +1213,12 @@ export default function App() {
         </div>
         {/* Botões de navegação entre telas */}
         <div className="app-header-nav">
-          <input
-            ref={importJsonInputRef}
-            type="file"
-            accept="application/json,.json"
-            onChange={handleImportJsonChange}
-            style={{ display: "none" }}
-          />
           {[["dashboard", "📊 Dashboard"], ["entry", "➕ Nova Contagem"]].map(([v, label]) => (
             <button key={v} className="tab-btn"
               onClick={() => v === "entry" ? startNew() : setView(v)}
               style={{ background: view === v ? UI.accent : "transparent", color: view === v ? "#fff" : UI.textSoft, border: `1px solid ${view === v ? UI.accent : UI.border}` }}
             >{label}</button>
           ))}
-          <button
-            className="tab-btn"
-            onClick={exportAllJson}
-            style={{ background: "transparent", color: UI.textSoft, border: `1px solid ${UI.border}` }}
-          >
-            ⬇️ JSON
-          </button>
-          <button
-            className="tab-btn"
-            onClick={requestImportJson}
-            style={{ background: "transparent", color: UI.textSoft, border: `1px solid ${UI.border}` }}
-          >
-            ⬆️ Importar
-          </button>
           <button
             className="tab-btn"
             onClick={() => setShowTrial(true)}
@@ -1418,7 +1255,7 @@ export default function App() {
           applyWorkspaceCode={(nextCode) => {
             const cleaned = String(nextCode || "").trim();
             if (!cleaned) return;
-            try { localStorage.setItem(DEVICE_ID_KEY, cleaned); } catch {}
+            try { localStorage.setItem(WORKSPACE_CODE_KEY, cleaned); } catch {}
             setWorkspaceCode(cleaned);
             setDay0("");
             setCounts([]);
@@ -1430,6 +1267,7 @@ export default function App() {
           }}
           day0={day0}
           setDay0={setDay0}
+          clearWorkspaceData={clearWorkspaceData}
           onClose={() => setShowTrial(false)}
         />
       )}
@@ -2290,7 +2128,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
   );
 }
 
-function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, onClose }) {
+function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, clearWorkspaceData, onClose }) {
   const [code, setCode] = useState(workspaceCode || "");
   const [value, setValue] = useState(day0 || "");
 
@@ -2395,7 +2233,35 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, onC
             onChange={(e) => setValue(e.target.value)}
             style={{ ...inputStyle, width: 180, textAlign: "center" }}
           />
-          <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
+          <div style={{ display: "flex", gap: 10, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button
+              className="btn"
+              onClick={async () => {
+                const txt = String(code || "").trim();
+                if (!txt) return;
+                if (!window.confirm("Isso vai APAGAR todos os dados deste código no Supabase. Continuar?")) return;
+                try {
+                  await clearWorkspaceData?.(txt);
+                  applyWorkspaceCode(txt);
+                  setValue("");
+                  setDay0("");
+                  onClose();
+                } catch (err) {
+                  alert(err?.message || "Não foi possível limpar os dados no Supabase.");
+                }
+              }}
+              style={{
+                background: "#c47b6a11",
+                border: "1px solid #c47b6a33",
+                borderRadius: 8,
+                padding: "10px 16px",
+                fontSize: 13,
+                fontFamily: FONT_SANS,
+                color: "#c47b6a",
+              }}
+            >
+              Limpar ensaio
+            </button>
             <button
               className="btn"
               onClick={onClose}
