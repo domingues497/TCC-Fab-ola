@@ -112,6 +112,7 @@ function withTimeout(promise, ms, label) {
 
 async function loadSupabaseMeta(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
+  if (!String(deviceId || "").trim()) return null;
   const { data, error } = await supabase
     .from(SUPABASE_META_TABLE)
     .select("day0")
@@ -123,6 +124,7 @@ async function loadSupabaseMeta(deviceId) {
 
 async function saveSupabaseMeta(deviceId, day0) {
   if (!isSupabaseConfigured || !supabase) return;
+  if (!String(deviceId || "").trim()) return;
   await supabase
     .from(SUPABASE_META_TABLE)
     .upsert({ device_id: deviceId, day0 }, { onConflict: "device_id" });
@@ -130,6 +132,7 @@ async function saveSupabaseMeta(deviceId, day0) {
 
 async function loadSupabaseCounts(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
+  if (!String(deviceId || "").trim()) return null;
   const { data, error } = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .select("trial_code, kind, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
@@ -150,6 +153,7 @@ async function loadSupabaseCounts(deviceId) {
 
 async function upsertSupabaseCount(deviceId, entry) {
   if (!isSupabaseConfigured || !supabase) return;
+  if (!String(deviceId || "").trim()) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   await supabase
@@ -172,6 +176,7 @@ async function upsertSupabaseCount(deviceId, entry) {
 
 async function deleteSupabaseCount(deviceId, entry) {
   if (!isSupabaseConfigured || !supabase) return;
+  if (!String(deviceId || "").trim()) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   await supabase
@@ -185,6 +190,7 @@ async function deleteSupabaseCount(deviceId, entry) {
 
 async function loadSupabaseMoisture(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
+  if (!String(deviceId || "").trim()) return null;
   const { data, error } = await supabase
     .from(SUPABASE_MOISTURE_TABLE)
     .select("rep_label, m1, m2, m3")
@@ -202,6 +208,7 @@ async function loadSupabaseMoisture(deviceId) {
 
 async function upsertSupabaseMoistureRows(deviceId, rows) {
   if (!isSupabaseConfigured || !supabase) return;
+  if (!String(deviceId || "").trim()) return;
   const payload = (rows || []).map((r) => ({
     device_id: deviceId,
     trial_code: "principal",
@@ -850,6 +857,7 @@ export default function App() {
     if (!isSupabaseConfigured || !supabase) return;
     if (loading) return;
     const deviceId = workspaceCodeRef.current;
+    if (!String(deviceId || "").trim()) return;
     const signature = JSON.stringify({ deviceId, day0: day0 || null });
     if (signature === supabaseMetaSignatureRef.current) return;
     supabaseMetaSignatureRef.current = signature;
@@ -863,6 +871,7 @@ export default function App() {
     if (!isSupabaseConfigured || !supabase) return;
     if (loading) return;
     const deviceId = workspaceCodeRef.current;
+    if (!String(deviceId || "").trim()) return;
     const signature = JSON.stringify({ deviceId, rows: moistureRows || [] });
     if (signature === supabaseMoistureSignatureRef.current) return;
     supabaseMoistureSignatureRef.current = signature;

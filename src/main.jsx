@@ -4,7 +4,15 @@ import { registerSW } from "virtual:pwa-register";
 import App from "../germination-bi_4.jsx";
 import "./main.css";
 
-registerSW({ immediate: true });
+if (import.meta.env.PROD) {
+  let updateSW = () => {};
+  updateSW = registerSW({
+    immediate: true,
+    onNeedRefresh() {
+      updateSW(true);
+    },
+  });
+}
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
