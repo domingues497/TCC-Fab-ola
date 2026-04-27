@@ -96,6 +96,20 @@ function clearLegacyLocalData() {
   } catch {}
 }
 
+function withTimeout(promise, ms, label) {
+  const t = Number(ms);
+  const timeoutMs = Number.isFinite(t) && t > 0 ? t : 12000;
+  const name = String(label || "").trim();
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(name ? `Timeout ao carregar ${name} no Supabase.` : "Timeout ao carregar dados no Supabase."));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
 async function loadSupabaseMeta(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
   const { data, error } = await supabase
@@ -758,6 +772,8 @@ export default function App() {
   const [editIdx, setEditIdx]         = useState(null);        // null = novo, número = edição
   const [showTrial, setShowTrial]     = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [loadingError, setLoadingError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
   const countsRef                     = useRef([]);
   const supabaseMetaTimerRef          = useRef(null);
   const supabaseMetaSignatureRef      = useRef("");
@@ -784,6 +800,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       clearLegacyLocalData();
+      setLoadingError("");
       const deviceId = workspaceCode;
       if (!deviceId) {
         setCounts([]);
@@ -796,27 +813,38 @@ export default function App() {
         return;
       }
 
-      const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
-        loadSupabaseMeta(deviceId),
-        loadSupabaseCounts(deviceId),
-        loadSupabaseMoisture(deviceId),
-      ]);
-
       const pending = pendingInitRef.current;
-      const nextDay0 = (remoteDay0 || (pending?.code === deviceId ? pending?.day0 : "") || "");
-      setDay0(nextDay0);
-      setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
-      setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
-        ? remoteMoisture
-        : [
+      try {
+        const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
+          withTimeout(loadSupabaseMeta(deviceId), 12000, "Dia 0"),
+          withTimeout(loadSupabaseCounts(deviceId), 12000, "contagens"),
+          withTimeout(loadSupabaseMoisture(deviceId), 12000, "umidade"),
+        ]);
+
+        const nextDay0 = (remoteDay0 || (pending?.code === deviceId ? pending?.day0 : "") || "");
+        setDay0(nextDay0);
+        setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
+        setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
+          ? remoteMoisture
+          : [
+            { id: "Rep 1", m1: "", m2: "", m3: "" },
+            { id: "Rep 2", m1: "", m2: "", m3: "" },
+          ]);
+      } catch (err) {
+        const nextDay0 = (pending?.code === deviceId ? pending?.day0 : "") || "";
+        setDay0(nextDay0);
+        setCounts([]);
+        setMoistureRows([
           { id: "Rep 1", m1: "", m2: "", m3: "" },
           { id: "Rep 2", m1: "", m2: "", m3: "" },
         ]);
-
-      if (pending?.code === deviceId) pendingInitRef.current = null;
-      setLoading(false);
+        setLoadingError(err?.message || "Não foi possível carregar dados do Supabase.");
+      } finally {
+        if (pending?.code === deviceId) pendingInitRef.current = null;
+        setLoading(false);
+      }
     })();
-  }, [workspaceCode]);
+  }, [workspaceCode, reloadKey]);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -1129,8 +1157,19 @@ export default function App() {
 
   // ── TELA DE CARREGAMENTO ─────────────────────────────────────────
   if (loading) return (
-    <div style={{ background: UI.bg, color: UI.accent, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_SANS, fontSize: 14 }}>
-      Carregando dados...
+    <div style={{ background: UI.bg, color: UI.accent, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_SANS, fontSize: 14, padding: 24 }}>
+      <div style={{ maxWidth: 520, textAlign: "center" }}>
+        <div>Carregando dados...</div>
+        <div style={{ marginTop: 12 }}>
+          <button
+            className="btn"
+            onClick={() => { setLoading(false); setShowTrial(true); }}
+            style={{ background: "transparent", border: `1px solid ${UI.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, fontFamily: FONT_SANS, color: UI.textSoft }}
+          >
+            Abrir Cadastro do Ensaio
+          </button>
+        </div>
+      </div>
     </div>
   );
 
@@ -1232,6 +1271,31 @@ export default function App() {
           </button>
         </div>
       </div>
+      {loadingError ? (
+        <div style={{ padding: "10px 24px", background: "#c47b6a11", borderBottom: `1px solid ${UI.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12, color: "#9b3f31", fontFamily: FONT_SANS }}>
+              {loadingError}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn"
+                onClick={() => { setLoading(true); setReloadKey(k => k + 1); }}
+                style={{ background: "transparent", border: `1px solid ${UI.border}`, borderRadius: 10, padding: "8px 10px", fontSize: 12, fontFamily: FONT_SANS, color: UI.textSoft }}
+              >
+                Tentar novamente
+              </button>
+              <button
+                className="btn"
+                onClick={() => setShowTrial(true)}
+                style={{ background: "transparent", border: `1px solid ${UI.border}`, borderRadius: 10, padding: "8px 10px", fontSize: 12, fontFamily: FONT_SANS, color: UI.textSoft }}
+              >
+                Abrir Ensaio
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* ════ ROTEAMENTO DE TELAS ════════════════════════════════════
           Em vez de um router externo, usamos condicionais simples */}
@@ -1269,6 +1333,7 @@ export default function App() {
               { id: "Rep 1", m1: "", m2: "", m3: "" },
               { id: "Rep 2", m1: "", m2: "", m3: "" },
             ]);
+            setLoadingError("");
             setLoading(true);
           }}
           day0={day0}
