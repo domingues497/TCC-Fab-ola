@@ -736,6 +736,7 @@ export default function App() {
   // ── ESTADO ──────────────────────────────────────────────────────
   const [workspaceCode, setWorkspaceCode] = useState(getStoredWorkspaceCode());
   const workspaceCodeRef = useRef(workspaceCode);
+  const pendingInitRef = useRef(null);
   const initialTrialId = "principal";
   const initialKind = "vigor";
   const initialPreset = getTrialPreset(initialTrialId, initialKind);
@@ -801,7 +802,9 @@ export default function App() {
         loadSupabaseMoisture(deviceId),
       ]);
 
-      setDay0(remoteDay0 || "");
+      const pending = pendingInitRef.current;
+      const nextDay0 = (remoteDay0 || (pending?.code === deviceId ? pending?.day0 : "") || "");
+      setDay0(nextDay0);
       setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
       setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
         ? remoteMoisture
@@ -810,6 +813,7 @@ export default function App() {
           { id: "Rep 2", m1: "", m2: "", m3: "" },
         ]);
 
+      if (pending?.code === deviceId) pendingInitRef.current = null;
       setLoading(false);
     })();
   }, [workspaceCode]);
@@ -889,7 +893,7 @@ export default function App() {
           loadSupabaseCounts(deviceId),
           loadSupabaseMoisture(deviceId),
         ]);
-        setDay0(remoteDay0 || "");
+        if (remoteDay0) setDay0(remoteDay0);
         setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
         setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
           ? remoteMoisture
@@ -1252,12 +1256,14 @@ export default function App() {
       {showTrial && (
         <TrialSetupModal
           workspaceCode={workspaceCode}
-          applyWorkspaceCode={(nextCode) => {
+          applyWorkspaceCode={(nextCode, nextDay0) => {
             const cleaned = String(nextCode || "").trim();
             if (!cleaned) return;
+            const d0 = String(nextDay0 || "").trim();
+            pendingInitRef.current = { code: cleaned, day0: d0 };
             try { localStorage.setItem(WORKSPACE_CODE_KEY, cleaned); } catch {}
             setWorkspaceCode(cleaned);
-            setDay0("");
+            setDay0(d0);
             setCounts([]);
             setMoistureRows([
               { id: "Rep 1", m1: "", m2: "", m3: "" },
@@ -2242,7 +2248,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
                 if (!window.confirm("Isso vai APAGAR todos os dados deste código no Supabase. Continuar?")) return;
                 try {
                   await clearWorkspaceData?.(txt);
-                  applyWorkspaceCode(txt);
+                  applyWorkspaceCode(txt, "");
                   setValue("");
                   setDay0("");
                   onClose();
@@ -2280,8 +2286,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
             <button
               className="btn"
               onClick={() => {
-                applyWorkspaceCode(code);
-                setDay0(value);
+                applyWorkspaceCode(code, value);
                 onClose();
               }}
               style={{
