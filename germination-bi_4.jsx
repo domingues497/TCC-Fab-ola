@@ -70,6 +70,7 @@ const WORKSPACE_CODE_KEY = "germinacao_device_id_v1";
 const SUPABASE_META_TABLE = "germinacao_meta";
 const SUPABASE_COUNTS_TABLE = "germinacao_counts";
 const SUPABASE_MOISTURE_TABLE = "germinacao_moisture";
+const DEFAULT_DAY0 = "2026-04-11";
 
 function getStoredWorkspaceCode() {
   try {
@@ -113,18 +114,32 @@ function withTimeout(promise, ms, label) {
 async function loadSupabaseMeta(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
   if (!String(deviceId || "").trim()) return null;
-  const { data, error } = await supabase
+  const tryFull = await supabase
+    .from(SUPABASE_META_TABLE)
+    .select("day0,mountings")
+    .eq("device_id", deviceId)
+    .maybeSingle();
+  if (!tryFull.error) {
+    return { day0: tryFull.data?.day0 || null, mountings: tryFull.data?.mountings ?? null };
+  }
+  const tryLegacy = await supabase
     .from(SUPABASE_META_TABLE)
     .select("day0")
     .eq("device_id", deviceId)
     .maybeSingle();
-  if (error) return null;
-  return data?.day0 || null;
+  if (tryLegacy.error) return null;
+  return { day0: tryLegacy.data?.day0 || null, mountings: null };
 }
 
-async function saveSupabaseMeta(deviceId, day0) {
+async function saveSupabaseMeta(deviceId, payload) {
   if (!isSupabaseConfigured || !supabase) return;
   if (!String(deviceId || "").trim()) return;
+  const day0 = payload?.day0 ?? null;
+  const mountings = payload?.mountings ?? null;
+  const full = await supabase
+    .from(SUPABASE_META_TABLE)
+    .upsert({ device_id: deviceId, day0, mountings }, { onConflict: "device_id" });
+  if (!full.error) return;
   await supabase
     .from(SUPABASE_META_TABLE)
     .upsert({ device_id: deviceId, day0 }, { onConflict: "device_id" });
@@ -133,18 +148,39 @@ async function saveSupabaseMeta(deviceId, day0) {
 async function loadSupabaseCounts(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
   if (!String(deviceId || "").trim()) return null;
-  const { data, error } = await supabase
+  const tryFull = await supabase
+    .from(SUPABASE_COUNTS_TABLE)
+    .select("trial_code, kind, mounting_id, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
+    .eq("device_id", deviceId)
+    .order("dat", { ascending: true });
+  if (!tryFull.error) {
+    const data = tryFull.data || [];
+    return data.map((row) => ({
+      dat: row.dat,
+      grid: row.grid,
+      countDate: row.count_date,
+      kind: row.kind,
+      trialId: row.trial_code,
+      mountingId: row.mounting_id || "default",
+      rolosCount: row.rolos_count,
+      seedsPerRolo: row.seeds_per_rolo,
+      savedAt: row.saved_at,
+    })).sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+  }
+  const tryLegacy = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .select("trial_code, kind, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
     .eq("device_id", deviceId)
     .order("dat", { ascending: true });
-  if (error) return null;
-  return (data || []).map((row) => ({
+  if (tryLegacy.error) return null;
+  const data = tryLegacy.data || [];
+  return data.map((row) => ({
     dat: row.dat,
     grid: row.grid,
     countDate: row.count_date,
     kind: row.kind,
     trialId: row.trial_code,
+    mountingId: "default",
     rolosCount: row.rolos_count,
     seedsPerRolo: row.seeds_per_rolo,
     savedAt: row.saved_at,
@@ -156,6 +192,23 @@ async function upsertSupabaseCount(deviceId, entry) {
   if (!String(deviceId || "").trim()) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
+  const mountingId = getCountMountingId(entry);
+  const payloadFull = {
+    device_id: deviceId,
+    trial_code: trialId,
+    kind,
+    mounting_id: mountingId,
+    dat: Number(entry.dat),
+    count_date: entry.countDate || null,
+    rolos_count: Number(entry.rolosCount || getCountRolos(entry).length),
+    seeds_per_rolo: Number(entry.seedsPerRolo || getCountSeedsPerRolo(entry)),
+    grid: entry.grid,
+    saved_at: entry.savedAt || new Date().toISOString(),
+  };
+  const full = await supabase
+    .from(SUPABASE_COUNTS_TABLE)
+    .upsert(payloadFull, { onConflict: "device_id,trial_code,kind,mounting_id,dat" });
+  if (!full.error) return;
   await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .upsert(
@@ -179,6 +232,16 @@ async function deleteSupabaseCount(deviceId, entry) {
   if (!String(deviceId || "").trim()) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
+  const mountingId = getCountMountingId(entry);
+  const full = await supabase
+    .from(SUPABASE_COUNTS_TABLE)
+    .delete()
+    .eq("device_id", deviceId)
+    .eq("trial_code", trialId)
+    .eq("kind", kind)
+    .eq("mounting_id", mountingId)
+    .eq("dat", Number(entry.dat));
+  if (!full.error) return;
   await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .delete()
@@ -261,6 +324,69 @@ function calcMoisturePercent(m1, m2, m3) {
   return ((wetSampleMass - drySampleMass) / wetSampleMass) * 100;
 }
 
+function normalizeMountings(raw, day0) {
+  const preset = getTrialPreset("principal", "vigor");
+  const list = Array.isArray(raw) ? raw : [];
+  const cleaned = list
+    .map((m) => ({
+      id: String(m?.id || "").trim(),
+      label: String(m?.label || "").trim(),
+      mountDate: String(m?.mountDate || "").trim(),
+      trialId: String(m?.trialId || "").trim() || "principal",
+      rolosCount: Number.isFinite(Number(m?.rolosCount)) && Number(m.rolosCount) > 0 ? Math.floor(Number(m.rolosCount)) : null,
+      seedsPerRolo: Number.isFinite(Number(m?.seedsPerRolo)) && Number(m.seedsPerRolo) > 0 ? Math.floor(Number(m.seedsPerRolo)) : null,
+    }))
+    .filter((m) => Boolean(m.id));
+
+  const defaultMounting = {
+    id: "default",
+    label: "Montagem (padrão)",
+    mountDate: day0 || "",
+    trialId: "principal",
+    rolosCount: preset.rolosCount,
+    seedsPerRolo: preset.seedsPerRolo,
+  };
+
+  const next = cleaned.some((m) => m.id === "default")
+    ? cleaned.map((m) => (m.id === "default"
+      ? {
+        ...defaultMounting,
+        ...m,
+        mountDate: m.mountDate || defaultMounting.mountDate,
+        rolosCount: m.rolosCount ?? defaultMounting.rolosCount,
+        seedsPerRolo: m.seedsPerRolo ?? defaultMounting.seedsPerRolo,
+      }
+      : {
+        ...m,
+        label: m.label || (m.mountDate ? `Montagem ${formatPtBrDate(m.mountDate)}` : "Montagem"),
+        rolosCount: m.rolosCount ?? preset.rolosCount,
+        seedsPerRolo: m.seedsPerRolo ?? preset.seedsPerRolo,
+      }))
+    : [
+      defaultMounting,
+      ...cleaned.map((m) => ({
+        ...m,
+        label: m.label || (m.mountDate ? `Montagem ${formatPtBrDate(m.mountDate)}` : "Montagem"),
+        rolosCount: m.rolosCount ?? preset.rolosCount,
+        seedsPerRolo: m.seedsPerRolo ?? preset.seedsPerRolo,
+      })),
+    ];
+
+  const withoutDefault = next.filter((m) => m.id !== "default");
+  withoutDefault.sort((a, b) => {
+    const ad = a.mountDate || "";
+    const bd = b.mountDate || "";
+    if (ad !== bd) return ad.localeCompare(bd);
+    return (a.label || "").localeCompare(b.label || "");
+  });
+  return [next.find((m) => m.id === "default") || defaultMounting, ...withoutDefault];
+}
+
+function generateMountingId() {
+  if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+  return `${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+}
+
 function getCountKind(entry) {
   const k = entry?.kind;
   if (k === "vigor" || k === "germinacao") return k;
@@ -278,6 +404,11 @@ function countKindOrder(entryOrKind) {
 function getCountTrialId(entry) {
   const t = entry?.trialId;
   return typeof t === "string" && t ? t : "principal";
+}
+
+function getCountMountingId(entry) {
+  const m = entry?.mountingId;
+  return typeof m === "string" && m ? m : "default";
 }
 
 function getCountRolos(entry) {
@@ -767,12 +898,15 @@ export default function App() {
   const [counts, setCounts]           = useState([]);          // Array de contagens salvas
   const [loading, setLoading]         = useState(true);        // Carregamento inicial
   const [dat, setDat]                 = useState("");          // DAT do formulário
-  const [day0, setDay0]               = useState("");          // Dia 0 do ensaio (data do tratamento)
+  const [day0, setDay0]               = useState(DEFAULT_DAY0);          // Dia 0 do ensaio (data do tratamento)
   const [countDate, setCountDate]     = useState("");          // Data da contagem (yyyy-mm-dd)
   const [countKind, setCountKind]     = useState(initialKind);
   const [countTrialId, setCountTrialId] = useState(initialTrialId);
   const [countRolosCount, setCountRolosCount] = useState(initialPreset.rolosCount);
   const [countSeedsPerRolo, setCountSeedsPerRolo] = useState(initialPreset.seedsPerRolo);
+  const [mountings, setMountings]     = useState(() => normalizeMountings([], DEFAULT_DAY0));
+  const [activeMountingId, setActiveMountingId] = useState("default");
+  const [showMounting, setShowMounting] = useState(false);
   const [grid, setGrid]               = useState(emptyGrid(initialRolos)); // Dados N/A/M do formulário
   const [activeTreat, setActiveTreat] = useState("T0");        // Aba ativa no formulário
   const [saved, setSaved]             = useState(false);       // Animação de confirmação
@@ -812,6 +946,8 @@ export default function App() {
       if (!deviceId) {
         setCounts([]);
         setDay0("");
+        setMountings(normalizeMountings([], ""));
+        setActiveMountingId("default");
         setMoistureRows([
           { id: "Rep 1", m1: "", m2: "", m3: "" },
           { id: "Rep 2", m1: "", m2: "", m3: "" },
@@ -822,14 +958,23 @@ export default function App() {
 
       const pending = pendingInitRef.current;
       try {
-        const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
+        const [remoteMeta, remoteCounts, remoteMoisture] = await Promise.all([
           withTimeout(loadSupabaseMeta(deviceId), 12000, "Dia 0"),
           withTimeout(loadSupabaseCounts(deviceId), 12000, "contagens"),
           withTimeout(loadSupabaseMoisture(deviceId), 12000, "umidade"),
         ]);
 
+        const remoteDay0 = remoteMeta?.day0 || null;
+        const remoteMountings = remoteMeta?.mountings ?? null;
         const nextDay0 = (remoteDay0 || (pending?.code === deviceId ? pending?.day0 : "") || "");
+        const nextMountings = normalizeMountings(remoteMountings, nextDay0);
         setDay0(nextDay0);
+        setMountings(nextMountings);
+        setActiveMountingId((prev) => {
+          const keep = String(prev || "").trim();
+          if (keep && nextMountings.some((m) => m.id === keep)) return keep;
+          return nextMountings[0]?.id || "default";
+        });
         setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
         setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
           ? remoteMoisture
@@ -840,6 +985,8 @@ export default function App() {
       } catch (err) {
         const nextDay0 = (pending?.code === deviceId ? pending?.day0 : "") || "";
         setDay0(nextDay0);
+        setMountings(normalizeMountings([], nextDay0));
+        setActiveMountingId("default");
         setCounts([]);
         setMoistureRows([
           { id: "Rep 1", m1: "", m2: "", m3: "" },
@@ -858,14 +1005,14 @@ export default function App() {
     if (loading) return;
     const deviceId = workspaceCodeRef.current;
     if (!String(deviceId || "").trim()) return;
-    const signature = JSON.stringify({ deviceId, day0: day0 || null });
+    const signature = JSON.stringify({ deviceId, day0: day0 || null, mountings: mountings || [] });
     if (signature === supabaseMetaSignatureRef.current) return;
     supabaseMetaSignatureRef.current = signature;
     if (supabaseMetaTimerRef.current) clearTimeout(supabaseMetaTimerRef.current);
     supabaseMetaTimerRef.current = setTimeout(() => {
-      saveSupabaseMeta(deviceId, day0 || null);
+      saveSupabaseMeta(deviceId, { day0: day0 || null, mountings: mountings || [] });
     }, 600);
-  }, [day0, workspaceCode, loading]);
+  }, [day0, mountings, workspaceCode, loading]);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -894,9 +1041,10 @@ export default function App() {
   useEffect(() => {
     if (editIdx !== null) return;
     const preset = getTrialPreset(countTrialId, countKind);
-    setCountRolosCount(preset.rolosCount);
-    setCountSeedsPerRolo(preset.seedsPerRolo);
-  }, [countTrialId, countKind, editIdx]);
+    const m = mountings.find((x) => x.id === (activeMountingId || "default"));
+    setCountRolosCount(m?.rolosCount || preset.rolosCount);
+    setCountSeedsPerRolo(m?.seedsPerRolo || preset.seedsPerRolo);
+  }, [countTrialId, countKind, editIdx, mountings, activeMountingId]);
 
   useEffect(() => {
     const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
@@ -925,12 +1073,23 @@ export default function App() {
       if (editIdxRef.current !== null) return;
       if (realtimeRefreshTimerRef.current) clearTimeout(realtimeRefreshTimerRef.current);
       realtimeRefreshTimerRef.current = setTimeout(async () => {
-        const [remoteDay0, remoteCounts, remoteMoisture] = await Promise.all([
+        const [remoteMeta, remoteCounts, remoteMoisture] = await Promise.all([
           loadSupabaseMeta(deviceId),
           loadSupabaseCounts(deviceId),
           loadSupabaseMoisture(deviceId),
         ]);
+        const remoteDay0 = remoteMeta?.day0 || null;
+        const remoteMountings = remoteMeta?.mountings ?? null;
         if (remoteDay0) setDay0(remoteDay0);
+        if (remoteMountings !== null) {
+          const normalized = normalizeMountings(remoteMountings, remoteDay0 || day0 || "");
+          setMountings(normalized);
+          setActiveMountingId((prev) => {
+            const keep = String(prev || "").trim();
+            if (keep && normalized.some((m) => m.id === keep)) return keep;
+            return normalized[0]?.id || "default";
+          });
+        }
         setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
         setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
           ? remoteMoisture
@@ -979,6 +1138,7 @@ export default function App() {
         device_id: deviceId,
         trial_code: getCountTrialId(c),
         kind: getCountKind(c),
+        mounting_id: getCountMountingId(c),
         dat: Number(c.dat),
         count_date: c.countDate || null,
         rolos_count: Number(c.rolosCount || getCountRolos(c).length),
@@ -988,20 +1148,26 @@ export default function App() {
       }));
 
       if (rows.length) {
-        await supabase
+        const full = await supabase
           .from(SUPABASE_COUNTS_TABLE)
-          .upsert(rows, { onConflict: "device_id,trial_code,kind,dat" });
+          .upsert(rows, { onConflict: "device_id,trial_code,kind,mounting_id,dat" });
+        if (full.error) {
+          const legacyRows = rows.map(({ mounting_id: _m, ...rest }) => rest);
+          await supabase
+            .from(SUPABASE_COUNTS_TABLE)
+            .upsert(legacyRows, { onConflict: "device_id,trial_code,kind,dat" });
+        }
       }
 
-      const { data: existing, error } = await supabase
+      const fullExisting = await supabase
         .from(SUPABASE_COUNTS_TABLE)
-        .select("trial_code, kind, dat")
+        .select("trial_code, kind, mounting_id, dat")
         .eq("device_id", deviceId);
 
-      if (!error && Array.isArray(existing)) {
-        const keep = new Set(rows.map((r) => `${r.trial_code}|${r.kind}|${r.dat}`));
-        for (const ex of existing) {
-          const key = `${ex.trial_code}|${ex.kind}|${ex.dat}`;
+      if (!fullExisting.error && Array.isArray(fullExisting.data)) {
+        const keep = new Set(rows.map((r) => `${r.trial_code}|${r.kind}|${r.mounting_id}|${r.dat}`));
+        for (const ex of fullExisting.data) {
+          const key = `${ex.trial_code}|${ex.kind}|${ex.mounting_id || "default"}|${ex.dat}`;
           if (keep.has(key)) continue;
           await supabase
             .from(SUPABASE_COUNTS_TABLE)
@@ -1009,7 +1175,28 @@ export default function App() {
             .eq("device_id", deviceId)
             .eq("trial_code", ex.trial_code)
             .eq("kind", ex.kind)
+            .eq("mounting_id", ex.mounting_id || "default")
             .eq("dat", ex.dat);
+        }
+      } else {
+        const legacyExisting = await supabase
+          .from(SUPABASE_COUNTS_TABLE)
+          .select("trial_code, kind, dat")
+          .eq("device_id", deviceId);
+        if (!legacyExisting.error && Array.isArray(legacyExisting.data)) {
+          const legacyRows = rows.map(({ mounting_id: _m, ...rest }) => rest);
+          const keep = new Set(legacyRows.map((r) => `${r.trial_code}|${r.kind}|${r.dat}`));
+          for (const ex of legacyExisting.data) {
+            const key = `${ex.trial_code}|${ex.kind}|${ex.dat}`;
+            if (keep.has(key)) continue;
+            await supabase
+              .from(SUPABASE_COUNTS_TABLE)
+              .delete()
+              .eq("device_id", deviceId)
+              .eq("trial_code", ex.trial_code)
+              .eq("kind", ex.kind)
+              .eq("dat", ex.dat);
+          }
         }
       }
     })();
@@ -1032,6 +1219,7 @@ export default function App() {
       countDate,
       kind: countKind,
       trialId: countTrialId,
+      mountingId: activeMountingId || "default",
       rolosCount: countRolosCount,
       seedsPerRolo: countSeedsPerRolo,
       savedAt: new Date().toISOString(),
@@ -1045,7 +1233,8 @@ export default function App() {
       const exists = counts.findIndex(c =>
         c.dat === d &&
         getCountKind(c) === countKind &&
-        getCountTrialId(c) === countTrialId
+        getCountTrialId(c) === countTrialId &&
+        getCountMountingId(c) === getCountMountingId(entry)
       );
       if (exists >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "Vigor" : "Germinação"}). Substituir?`)) return;
       next = exists >= 0
@@ -1057,7 +1246,8 @@ export default function App() {
       const changedKey =
         Number(previous.dat) !== Number(entry.dat) ||
         getCountKind(previous) !== getCountKind(entry) ||
-        getCountTrialId(previous) !== getCountTrialId(entry);
+        getCountTrialId(previous) !== getCountTrialId(entry) ||
+        getCountMountingId(previous) !== getCountMountingId(entry);
       if (changedKey) await deleteSupabaseCount(workspaceCodeRef.current, previous);
     }
     await upsertSupabaseCount(workspaceCodeRef.current, entry);
@@ -1072,6 +1262,7 @@ export default function App() {
     setCountDate(String((c.countDate || c.savedAt || "").slice(0, 10)));
     const nextKind = getCountKind(c);
     const nextTrialId = getCountTrialId(c);
+    setActiveMountingId(getCountMountingId(c));
     const rolos = getCountRolos(c);
     const seeds = getCountSeedsPerRolo(c);
     setCountKind(nextKind);
@@ -1113,10 +1304,14 @@ export default function App() {
     const dd = String(today.getDate()).padStart(2, "0");
     setCountDate(`${yyyy}-${mm}-${dd}`);
     setCountKind("vigor");
-    const preset = getTrialPreset(countTrialId, "vigor");
-    setCountRolosCount(preset.rolosCount);
-    setCountSeedsPerRolo(preset.seedsPerRolo);
-    setDat(""); setGrid(emptyGrid(makeRolos(preset.rolosCount))); setEditIdx(null);
+    const mounting = mountings.find((m) => m.id === (activeMountingId || "default")) || mountings[0];
+    const trialId = mounting?.trialId || countTrialId;
+    const preset = getTrialPreset(trialId, "vigor");
+    const rolosCount = mounting?.rolosCount || preset.rolosCount;
+    setCountTrialId(trialId);
+    setCountRolosCount(rolosCount);
+    setCountSeedsPerRolo(mounting?.seedsPerRolo || preset.seedsPerRolo);
+    setDat(""); setGrid(emptyGrid(makeRolos(rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
@@ -1124,10 +1319,14 @@ export default function App() {
   const startNewAtDate = (isoDate) => {
     setCountDate(isoDate);
     setCountKind("vigor");
-    const preset = getTrialPreset(countTrialId, "vigor");
-    setCountRolosCount(preset.rolosCount);
-    setCountSeedsPerRolo(preset.seedsPerRolo);
-    setDat(""); setGrid(emptyGrid(makeRolos(preset.rolosCount))); setEditIdx(null);
+    const mounting = mountings.find((m) => m.id === (activeMountingId || "default")) || mountings[0];
+    const trialId = mounting?.trialId || countTrialId;
+    const preset = getTrialPreset(trialId, "vigor");
+    const rolosCount = mounting?.rolosCount || preset.rolosCount;
+    setCountTrialId(trialId);
+    setCountRolosCount(rolosCount);
+    setCountSeedsPerRolo(mounting?.seedsPerRolo || preset.seedsPerRolo);
+    setDat(""); setGrid(emptyGrid(makeRolos(rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
   };
@@ -1183,6 +1382,8 @@ export default function App() {
   );
 
   // ── RENDERIZAÇÃO PRINCIPAL ───────────────────────────────────────
+  const activeMounting = mountings.find((m) => m.id === (activeMountingId || "default")) || mountings[0] || null;
+  const headerCounts = (counts || []).filter((c) => getCountMountingId(c) === (activeMountingId || "default"));
   return (
     <div style={{ minHeight: "100vh", background: UI.bg, color: UI.text, fontFamily: FONT_SANS }}>
 
@@ -1259,7 +1460,7 @@ export default function App() {
               ENSAIO DE GERMINAÇÃO
             </h1>
             <p style={{ fontSize: 10, color: UI.textSoft, fontFamily: FONT_SANS, letterSpacing: 0.3 }}>
-              Código: {workspaceCode || "—"} · Dia 0: {day0 ? formatPtBrDate(day0) : "—"} · {counts.length} CONTAGEM{counts.length !== 1 ? "S" : ""} · DATs: {counts.map(c => c.dat).join(", ") || "—"}
+              Código: {workspaceCode || "—"} · Dia 0: {day0 ? formatPtBrDate(day0) : "—"} · Montagem: {activeMounting?.label || "—"} · {headerCounts.length} CONTAGEM{headerCounts.length !== 1 ? "S" : ""} · DATs: {headerCounts.map(c => c.dat).join(", ") || "—"}
             </p>
           </div>
         </div>
@@ -1309,7 +1510,18 @@ export default function App() {
       {/* ════ ROTEAMENTO DE TELAS ════════════════════════════════════
           Em vez de um router externo, usamos condicionais simples */}
       {view === "dashboard" && (
-        <DashboardView counts={counts} startEdit={startEdit} deleteCount={deleteCount} openCalendar={() => setShowCalendar(true)} moistureRows={moistureRows} setMoistureRows={setMoistureRows} />
+        <DashboardView
+          counts={counts}
+          mountings={mountings}
+          activeMountingId={activeMountingId}
+          setActiveMountingId={setActiveMountingId}
+          openMountingModal={() => setShowMounting(true)}
+          startEdit={startEdit}
+          deleteCount={deleteCount}
+          openCalendar={() => setShowCalendar(true)}
+          moistureRows={moistureRows}
+          setMoistureRows={setMoistureRows}
+        />
       )}
       {view === "entry" && (
         <EntryView
@@ -1318,6 +1530,20 @@ export default function App() {
           countTrialId={countTrialId} setCountTrialId={setCountTrialId}
           countRolosCount={countRolosCount} setCountRolosCount={setCountRolosCount}
           countSeedsPerRolo={countSeedsPerRolo} setCountSeedsPerRolo={setCountSeedsPerRolo}
+          mountings={mountings}
+          activeMountingId={activeMountingId}
+          onChangeMounting={(nextId) => {
+            const id = String(nextId || "").trim() || "default";
+            setActiveMountingId(id);
+            const m = mountings.find((x) => x.id === id);
+            if (!m) return;
+            const trialId = m.trialId || "principal";
+            const preset = getTrialPreset(trialId, countKind);
+            setCountTrialId(trialId);
+            setCountRolosCount(m.rolosCount || preset.rolosCount);
+            setCountSeedsPerRolo(m.seedsPerRolo || preset.seedsPerRolo);
+          }}
+          openMountingModal={() => setShowMounting(true)}
           activeTreat={activeTreat} setActiveTreat={setActiveTreat}
           setCell={setCell} fillM={fillM}
           saved={saved} editIdx={editIdx}
@@ -1332,11 +1558,13 @@ export default function App() {
           applyWorkspaceCode={(nextCode, nextDay0) => {
             const cleaned = String(nextCode || "").trim();
             if (!cleaned) return;
-            const d0 = String(nextDay0 || "").trim();
+            const d0 = String(nextDay0 || "").trim() || DEFAULT_DAY0;
             pendingInitRef.current = { code: cleaned, day0: d0 };
             try { localStorage.setItem(WORKSPACE_CODE_KEY, cleaned); } catch {}
             setWorkspaceCode(cleaned);
             setDay0(d0);
+            setMountings(normalizeMountings([], d0));
+            setActiveMountingId("default");
             setCounts([]);
             setMoistureRows([
               { id: "Rep 1", m1: "", m2: "", m3: "" },
@@ -1361,6 +1589,17 @@ export default function App() {
           }}
         />
       )}
+      {showMounting && (
+        <MountingModal
+          day0={day0}
+          mountings={mountings}
+          onClose={() => setShowMounting(false)}
+          onAdd={(m) => {
+            setMountings((prev) => normalizeMountings([...(prev || []), m], day0));
+            setActiveMountingId(m.id);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1369,7 +1608,7 @@ export default function App() {
 // COMPONENTE: EntryView — Formulário de entrada de dados
 // Exibe grade N/A/M × R1-R12 por tratamento (selecionado via abas)
 // ══════════════════════════════════════════════════════════════════
-function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
+function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, mountings, activeMountingId, onChangeMounting, openMountingModal, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
   const inputRefs = useRef({});
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
@@ -1554,6 +1793,36 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
             onChange={e => setCountDate(e.target.value)}
             style={{ ...inputStyle, width: 160, textAlign: "center" }}
           />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Montagem:</span>
+            <select
+              value={activeMountingId || "default"}
+              onChange={(e) => onChangeMounting?.(e.target.value)}
+              disabled={editIdx !== null}
+              style={{ ...inputStyle, width: 210, textAlign: "left" }}
+            >
+              {(mountings || []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label || m.id}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn"
+              onClick={openMountingModal}
+              style={{
+                background: "transparent",
+                border: `1px solid ${UI.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: FONT_SANS,
+                color: UI.textSoft,
+              }}
+            >
+              + Montagem
+            </button>
+          </div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>DAT:</span>
             <span style={{ fontSize: 18, fontWeight: 700, color: UI.text, fontFamily: FONT_SANS }}>{dat || "—"}</span>
@@ -1564,13 +1833,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => {
-                  const nextKind = "vigor";
-                  setCountKind(nextKind);
-                  const preset = getTrialPreset(countTrialId, nextKind);
-                  setCountRolosCount(preset.rolosCount);
-                  setCountSeedsPerRolo(preset.seedsPerRolo);
-                }}
+                onClick={() => setCountKind("vigor")}
                 style={{
                   background: countKind === "vigor" ? UI.accent : "transparent",
                   color: countKind === "vigor" ? "#fff" : UI.textSoft,
@@ -1584,13 +1847,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => {
-                  const nextKind = "germinacao";
-                  setCountKind(nextKind);
-                  const preset = getTrialPreset(countTrialId, nextKind);
-                  setCountRolosCount(preset.rolosCount);
-                  setCountSeedsPerRolo(preset.seedsPerRolo);
-                }}
+                onClick={() => setCountKind("germinacao")}
                 style={{
                   background: countKind === "germinacao" ? UI.accent : "transparent",
                   color: countKind === "germinacao" ? "#fff" : UI.textSoft,
@@ -1609,13 +1866,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => {
-                  const nextTrialId = "principal";
-                  setCountTrialId(nextTrialId);
-                  const preset = getTrialPreset(nextTrialId, countKind);
-                  setCountRolosCount(preset.rolosCount);
-                  setCountSeedsPerRolo(preset.seedsPerRolo);
-                }}
+                onClick={() => setCountTrialId("principal")}
                 style={{
                   background: countTrialId === "principal" ? UI.accent : "transparent",
                   color: countTrialId === "principal" ? "#fff" : UI.textSoft,
@@ -1629,13 +1880,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               <button
                 type="button"
                 className="btn"
-                onClick={() => {
-                  const nextTrialId = "sem_vermiculita";
-                  setCountTrialId(nextTrialId);
-                  const preset = getTrialPreset(nextTrialId, countKind);
-                  setCountRolosCount(preset.rolosCount);
-                  setCountSeedsPerRolo(preset.seedsPerRolo);
-                }}
+                onClick={() => setCountTrialId("sem_vermiculita")}
                 style={{
                   background: countTrialId === "sem_vermiculita" ? UI.accent : "transparent",
                   color: countTrialId === "sem_vermiculita" ? "#fff" : UI.textSoft,
@@ -1785,7 +2030,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
 // ══════════════════════════════════════════════════════════════════
 // COMPONENTE: DashboardView — Painel analítico principal
 // ══════════════════════════════════════════════════════════════════
-function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureRows, setMoistureRows }) {
+function DashboardView({ counts, mountings, activeMountingId, setActiveMountingId, openMountingModal, startEdit, deleteCount, openCalendar, moistureRows, setMoistureRows }) {
 
   // Tratamento selecionado para o gráfico de rolos
   const [selT, setSelT] = useState("T1");
@@ -1794,7 +2039,10 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
   const roloChartRef = useRef(null);
 
   // Ordena por DAT crescente para os gráficos de linha
-  const sortedAll = [...counts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+  const activeId = String(activeMountingId || "").trim() || "default";
+  const activeMounting = (mountings || []).find((m) => m.id === activeId) || (mountings || [])[0] || null;
+  const filteredCounts = (counts || []).filter((c) => getCountMountingId(c) === activeId);
+  const sortedAll = [...filteredCounts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
   const groupedByDat = new Map();
   sortedAll.forEach(c => {
     const existing = groupedByDat.get(c.dat);
@@ -1866,11 +2114,39 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
   };
 
   // Estado vazio
-  if (!counts.length) return (
+  if (!filteredCounts.length) return (
     <div style={{ textAlign: "center", padding: "80px 24px", color: UI.textSoft }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>🌾</div>
-      <p style={{ fontFamily: FONT_SANS, fontSize: 13 }}>Nenhuma contagem registrada ainda.</p>
-      <p style={{ fontSize: 12, marginTop: 8 }}>Clique em "Nova Contagem" para começar.</p>
+      <p style={{ fontFamily: FONT_SANS, fontSize: 13 }}>Nenhuma contagem registrada nesta montagem.</p>
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
+        <select
+          value={activeId}
+          onChange={(e) => setActiveMountingId?.(e.target.value)}
+          style={{ ...inputStyle, width: 240, textAlign: "left" }}
+        >
+          {(mountings || []).map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label || m.id}
+            </option>
+          ))}
+        </select>
+        <button
+          className="btn"
+          onClick={openMountingModal}
+          style={{
+            background: "transparent",
+            border: `1px solid ${UI.border}`,
+            borderRadius: 8,
+            padding: "8px 12px",
+            fontSize: 12,
+            fontFamily: FONT_SANS,
+            color: UI.textSoft,
+          }}
+        >
+          + Montagem
+        </button>
+      </div>
+      <p style={{ fontSize: 12, marginTop: 10 }}>Selecione outra montagem ou crie uma nova.</p>
     </div>
   );
 
@@ -1886,9 +2162,35 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
     <div className="dashboard-layout">
       <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", marginBottom: 16 }}>
         <div style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>
-          Planejamento do ensaio e datas sugeridas
+          Montagem: <b style={{ color: UI.text }}>{activeMounting?.label || "—"}</b> · Planejamento do ensaio e datas sugeridas
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select
+            value={activeId}
+            onChange={(e) => setActiveMountingId?.(e.target.value)}
+            style={{ ...inputStyle, width: 220, textAlign: "left" }}
+          >
+            {(mountings || []).map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label || m.id}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn"
+            onClick={openMountingModal}
+            style={{
+              background: "transparent",
+              border: `1px solid ${UI.border}`,
+              borderRadius: 8,
+              padding: "8px 12px",
+              fontSize: 12,
+              fontFamily: FONT_SANS,
+              color: UI.textSoft,
+            }}
+          >
+            + Montagem
+          </button>
           <button
             className="btn"
             onClick={openCalendar}
@@ -1942,7 +2244,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
           sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "Vigor" : "Germinação"}`}
           color="#6f93b5" infoKey="ultimaContagem" />
 
-        <KPIBlock label="TOTAL DE CONTAGENS" val={counts.length}
+        <KPIBlock label="TOTAL DE CONTAGENS" val={filteredCounts.length}
           sub={`DATs: ${sorted.map(c => c.dat).join(", ")}`}
           color="#a78bfa" infoKey="totalContagens" />
 
@@ -2210,7 +2512,7 @@ function DashboardView({ counts, startEdit, deleteCount, openCalendar, moistureR
 
 function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, clearWorkspaceData, onClose }) {
   const [code, setCode] = useState(workspaceCode || "");
-  const [value, setValue] = useState(day0 || "");
+  const [value, setValue] = useState(day0 || DEFAULT_DAY0);
 
   return (
     <div
@@ -2377,6 +2679,193 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
               Salvar
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MountingModal({ day0, mountings, onClose, onAdd }) {
+  const [mountDate, setMountDate] = useState(day0 || "");
+  const [trialId, setTrialId] = useState("principal");
+  const preset = getTrialPreset(trialId, "vigor");
+  const [rolosCount, setRolosCount] = useState(String(preset.rolosCount));
+  const [seedsPerRolo, setSeedsPerRolo] = useState(String(preset.seedsPerRolo));
+  const [label, setLabel] = useState("");
+
+  useEffect(() => {
+    const next = getTrialPreset(trialId, "vigor");
+    setRolosCount(String(next.rolosCount));
+    setSeedsPerRolo(String(next.seedsPerRolo));
+  }, [trialId]);
+
+  const canSave = Boolean(String(mountDate || "").trim());
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.35)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={card({ maxWidth: 560, width: "100%", padding: 18 })}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: UI.text, fontFamily: FONT_SANS }}>
+            Nova montagem de rolos
+          </div>
+          <button
+            className="btn"
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: `1px solid ${UI.border}`,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+              fontFamily: FONT_SANS,
+              color: UI.textSoft,
+            }}
+          >
+            Fechar
+          </button>
+        </div>
+
+        <div style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS, lineHeight: 1.5, marginBottom: 12 }}>
+          Cada montagem representa um conjunto de rolos montados em uma data. As contagens (análises) ficam associadas à montagem selecionada.
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Data da montagem:</label>
+            <input
+              type="date"
+              value={mountDate}
+              onChange={(e) => setMountDate(e.target.value)}
+              style={{ ...inputStyle, width: "100%", textAlign: "center" }}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Ensaio:</label>
+            <select
+              value={trialId}
+              onChange={(e) => setTrialId(e.target.value)}
+              style={{ ...inputStyle, width: "100%", textAlign: "left" }}
+            >
+              <option value="principal">Principal</option>
+              <option value="sem_vermiculita">Sem vermiculita</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Rolos:</label>
+            <input
+              value={rolosCount}
+              onChange={(e) => setRolosCount(e.target.value.replace(/[^\d]/g, ""))}
+              inputMode="numeric"
+              placeholder={String(preset.rolosCount)}
+              style={{ ...inputStyle, width: "100%", textAlign: "center" }}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Sementes/rolo:</label>
+            <input
+              value={seedsPerRolo}
+              onChange={(e) => setSeedsPerRolo(e.target.value.replace(/[^\d]/g, ""))}
+              inputMode="numeric"
+              placeholder={String(preset.seedsPerRolo)}
+              style={{ ...inputStyle, width: "100%", textAlign: "center" }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Nome (opcional):</label>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder={mountDate ? `Montagem ${formatPtBrDate(mountDate)}` : "Montagem"}
+            style={{ ...inputStyle, flex: 1, minWidth: 220, textAlign: "left" }}
+          />
+        </div>
+
+        {(mountings || []).length > 0 ? (
+          <div style={{ marginTop: 12, borderTop: `1px solid ${UI.border}`, paddingTop: 10 }}>
+            <div style={{ fontSize: 11, color: UI.textSoft, fontFamily: FONT_SANS, marginBottom: 8 }}>
+              Montagens cadastradas:
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 120, overflow: "auto" }}>
+              {(mountings || []).map((m) => (
+                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, color: UI.text }}>
+                  <span style={{ fontFamily: FONT_SANS, fontWeight: 600 }}>{m.label || m.id}</span>
+                  <span style={{ color: UI.textSoft, fontFamily: FONT_SANS }}>{m.mountDate ? formatPtBrDate(m.mountDate) : "—"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <button
+            className="btn"
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: `1px solid ${UI.border}`,
+              borderRadius: 8,
+              padding: "10px 16px",
+              fontSize: 13,
+              fontFamily: FONT_SANS,
+              color: UI.textSoft,
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            className="btn"
+            disabled={!canSave}
+            onClick={() => {
+              const id = generateMountingId();
+              const d = String(mountDate || "").trim();
+              const nRolos = Number(rolosCount);
+              const nSeeds = Number(seedsPerRolo);
+              const next = {
+                id,
+                mountDate: d,
+                trialId,
+                rolosCount: Number.isFinite(nRolos) && nRolos > 0 ? nRolos : preset.rolosCount,
+                seedsPerRolo: Number.isFinite(nSeeds) && nSeeds > 0 ? nSeeds : preset.seedsPerRolo,
+                label: String(label || "").trim() || (d ? `Montagem ${formatPtBrDate(d)}` : "Montagem"),
+              };
+              onAdd?.(next);
+              onClose?.();
+            }}
+            style={{
+              background: "linear-gradient(135deg, #8ca8bf, #6f93b5)",
+              border: "none",
+              borderRadius: 8,
+              padding: "10px 18px",
+              fontSize: 13,
+              fontFamily: FONT_SANS,
+              fontWeight: 600,
+              color: "#fff",
+              opacity: canSave ? 1 : 0.6,
+              cursor: canSave ? "pointer" : "not-allowed",
+            }}
+          >
+            Salvar montagem
+          </button>
         </div>
       </div>
     </div>
