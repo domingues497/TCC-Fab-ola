@@ -32,7 +32,7 @@ import {
 const TREATMENTS = [
   { id: "T0", name: "Testemunha", color: "#c47b6a" }, // Controle sem fungicida
   { id: "T1", name: "Rancona",    color: "#6fa58b" }, // Fungicida Rancona
-  { id: "T2", name: "Avicts",     color: "#6f93b5" }, // Fungicida Avicts
+  { id: "T2", name: "Avicta",     color: "#6f93b5" }, // Fungicida Avicta
   { id: "T3", name: "Cropstar",   color: "#b69b6a" }, // Fungicida Cropstar
 ];
 
@@ -2158,6 +2158,15 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
     }
   };
 
+  const exportRoloPngAllTreatments = async () => {
+    const datLabel = latest?.dat || "atual";
+    for (const t of TREATMENTS) {
+      setSelT(t.id);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await exportPng(roloChartRef, `variacao_rolo_${t.id}_dat_${datLabel}`);
+    }
+  };
+
   return (
     <div className="dashboard-layout">
       <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", marginBottom: 16 }}>
@@ -2414,6 +2423,21 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
               }}
             >
               📷 PNG
+            </button>
+            <button
+              className="btn"
+              onClick={exportRoloPngAllTreatments}
+              style={{
+                background: "transparent",
+                border: `1px solid ${UI.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: FONT_SANS,
+                color: UI.textSoft,
+              }}
+            >
+              📷 PNG (T0–T3)
             </button>
           </div>
         </div>
