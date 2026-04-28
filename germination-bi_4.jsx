@@ -12,6 +12,7 @@
 // executar efeitos colaterais dentro de componentes funcionais.
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase, isSupabaseConfigured } from "./src/supabaseClient.js";
+import html2canvas from "html2canvas";
 
 // Recharts é a biblioteca de gráficos que usamos.
 // Cada nome importado é um componente de gráfico diferente.
@@ -508,6 +509,28 @@ async function exportFirstSvgAsPng(containerEl, fileName, opts = {}) {
   } finally {
     URL.revokeObjectURL(svgUrl);
   }
+}
+
+async function exportHtmlAsPng(containerEl, fileName, opts = {}) {
+  const { background = "#ffffff", pixelRatio = window.devicePixelRatio || 2 } = opts;
+  if (!containerEl) throw new Error("Container não encontrado.");
+  const pr = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 2;
+  const canvas = await html2canvas(containerEl, {
+    backgroundColor: background,
+    scale: pr,
+    useCORS: true,
+    logging: false,
+  });
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Não foi possível gerar o PNG.");
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = sanitizeFileName(fileName);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 
@@ -1613,8 +1636,11 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
   const lastAutoFocusKeyRef = useRef("");
+  const exportSheetRef = useRef(null);
   const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
   const seedsPerRolo = Number(countSeedsPerRolo || 0) || getTrialPreset(countTrialId, countKind).seedsPerRolo;
+  const datLabel = String(dat || (day0 && countDate ? (calcDat(day0, countDate) ?? "") : "") || "").trim();
+  const activeMounting = (mountings || []).find((m) => m.id === (activeMountingId || "default")) || (mountings || [])[0] || null;
 
   useEffect(() => {
     return () => {
@@ -1622,6 +1648,15 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
       timersRef.current = {};
     };
   }, []);
+
+  const exportAllTreatmentsSinglePng = async () => {
+    try {
+      const base = `contagem_${activeMounting?.label || "montagem"}_dat_${datLabel || "?"}_${countKind === "vigor" ? "vigor" : "germinacao"}_${countDate || ""}`;
+      await exportHtmlAsPng(exportSheetRef.current, `${base}.png`, { background: "#ffffff", pixelRatio: 2 });
+    } catch (err) {
+      alert(err?.message || "Não foi possível exportar o PNG.");
+    }
+  };
 
   const keyFor = (rolo, tipo) => `${activeTreat}:${rolo}:${tipo}`;
   const setInputRef = (rolo, tipo) => (el) => {
@@ -2009,12 +2044,81 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
         );
       })()}
 
+      <div style={{ position: "fixed", left: -10000, top: 0, background: "#ffffff" }}>
+        <div ref={exportSheetRef} style={{ width: 1200, padding: 18, background: "#ffffff", color: "#0f172a", fontFamily: FONT_SANS }}>
+          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.2 }}>
+            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "Vigor" : "Germinação"}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#334155", display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <span>Dia 0: <b style={{ color: "#0f172a" }}>{day0 ? formatPtBrDate(day0) : "—"}</b></span>
+            <span>Contagem: <b style={{ color: "#0f172a" }}>{countDate ? formatPtBrDate(countDate) : "—"}</b></span>
+            <span>Montagem: <b style={{ color: "#0f172a" }}>{activeMounting?.label || "—"}</b></span>
+            <span>Ensaio: <b style={{ color: "#0f172a" }}>{countTrialId === "sem_vermiculita" ? "Sem vermiculita" : "Principal"}</b></span>
+          </div>
+
+          {TREATMENTS.map((t) => {
+            const s = sumTreatment(grid, t.id, rolos);
+            const expected = rolos.length * seedsPerRolo;
+            return (
+              <div key={t.id} style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, marginTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, fontWeight: 900, color: t.color }}>
+                    {t.id} · {t.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#334155" }}>
+                    <span style={{ color: "#6fa58b", fontWeight: 800 }}>N:</span> {s.N}{" "}
+                    <span style={{ color: "#b69b6a", fontWeight: 800 }}>A:</span> {s.A}{" "}
+                    <span style={{ color: "#c47b6a", fontWeight: 800 }}>M:</span> {s.M}{" "}
+                    <span style={{ fontWeight: 800 }}>Total:</span> {s.total}/{expected}
+                  </div>
+                </div>
+
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                      <th style={{ textAlign: "left", padding: "8px 8px", color: "#475569", fontFamily: FONT_SANS, fontSize: 11, fontWeight: 800, width: 92 }}>Tipo</th>
+                      {rolos.map((r) => (
+                        <th key={r} style={{ textAlign: "center", padding: "8px 6px", color: "#475569", fontFamily: FONT_SANS, fontSize: 11, fontWeight: 800 }}>
+                          {r}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {TIPOS.map((tipo) => (
+                      <tr key={tipo} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                        <td style={{ padding: "8px 8px", fontFamily: FONT_SANS, fontWeight: 800, color: TIPO_COLORS[tipo] }}>
+                          {TIPO_LABELS[tipo]}
+                        </td>
+                        {rolos.map((r) => {
+                          const v = grid?.[t.id]?.[r]?.[tipo];
+                          const txt = v === "" || v === null || typeof v === "undefined" ? "—" : String(v);
+                          return (
+                            <td key={`${tipo}-${r}`} style={{ padding: "8px 6px", textAlign: "center", fontFamily: FONT_SANS, color: "#0f172a" }}>
+                              {txt}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Botões de ação */}
       <div className="entry-actions">
         <button className="btn" onClick={onCancel} style={{
           background: "transparent", border: `1px solid ${UI.border}`, color: UI.textSoft,
           borderRadius: 8, padding: "10px 20px", fontSize: 13, fontFamily: FONT_SANS,
         }}>Cancelar</button>
+        <button className="btn" onClick={exportAllTreatmentsSinglePng} style={{
+          background: "transparent", border: `1px solid ${UI.border}`, color: UI.textSoft,
+          borderRadius: 8, padding: "10px 20px", fontSize: 13, fontFamily: FONT_SANS,
+        }}>📷 PNG (T0–T3)</button>
         <button className="btn" onClick={handleSave} style={{
           background: saved ? "#6fa58b" : "linear-gradient(135deg, #8ca8bf, #6f93b5)",
           color: "#fff", border: "none", borderRadius: 8, padding: "10px 28px",
