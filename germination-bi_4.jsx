@@ -326,16 +326,12 @@ function calcMoisturePercent(m1, m2, m3) {
 }
 
 function normalizeMountings(raw, day0) {
-  const preset = getTrialPreset("principal", "vigor");
   const list = Array.isArray(raw) ? raw : [];
   const cleaned = list
     .map((m) => ({
       id: String(m?.id || "").trim(),
       label: String(m?.label || "").trim(),
       mountDate: String(m?.mountDate || "").trim(),
-      trialId: String(m?.trialId || "").trim() || "principal",
-      rolosCount: Number.isFinite(Number(m?.rolosCount)) && Number(m.rolosCount) > 0 ? Math.floor(Number(m.rolosCount)) : null,
-      seedsPerRolo: Number.isFinite(Number(m?.seedsPerRolo)) && Number(m.seedsPerRolo) > 0 ? Math.floor(Number(m.seedsPerRolo)) : null,
     }))
     .filter((m) => Boolean(m.id));
 
@@ -343,9 +339,6 @@ function normalizeMountings(raw, day0) {
     id: "default",
     label: "Montagem (padrão)",
     mountDate: day0 || "",
-    trialId: "principal",
-    rolosCount: preset.rolosCount,
-    seedsPerRolo: preset.seedsPerRolo,
   };
 
   const next = cleaned.some((m) => m.id === "default")
@@ -354,22 +347,16 @@ function normalizeMountings(raw, day0) {
         ...defaultMounting,
         ...m,
         mountDate: m.mountDate || defaultMounting.mountDate,
-        rolosCount: m.rolosCount ?? defaultMounting.rolosCount,
-        seedsPerRolo: m.seedsPerRolo ?? defaultMounting.seedsPerRolo,
       }
       : {
         ...m,
         label: m.label || (m.mountDate ? `Montagem ${formatPtBrDate(m.mountDate)}` : "Montagem"),
-        rolosCount: m.rolosCount ?? preset.rolosCount,
-        seedsPerRolo: m.seedsPerRolo ?? preset.seedsPerRolo,
       }))
     : [
       defaultMounting,
       ...cleaned.map((m) => ({
         ...m,
         label: m.label || (m.mountDate ? `Montagem ${formatPtBrDate(m.mountDate)}` : "Montagem"),
-        rolosCount: m.rolosCount ?? preset.rolosCount,
-        seedsPerRolo: m.seedsPerRolo ?? preset.seedsPerRolo,
       })),
     ];
 
@@ -1062,12 +1049,17 @@ export default function App() {
   }, [day0, countDate, editIdx]);
 
   useEffect(() => {
+    if (view !== "entry") return;
+    const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
+    setGrid((prev) => ensureGridHasRolos(prev, rolos));
+  }, [view, countTrialId, countKind, countRolosCount]);
+
+  useEffect(() => {
     if (editIdx !== null) return;
     const preset = getTrialPreset(countTrialId, countKind);
-    const m = mountings.find((x) => x.id === (activeMountingId || "default"));
-    setCountRolosCount(m?.rolosCount || preset.rolosCount);
-    setCountSeedsPerRolo(m?.seedsPerRolo || preset.seedsPerRolo);
-  }, [countTrialId, countKind, editIdx, mountings, activeMountingId]);
+    setCountRolosCount(preset.rolosCount);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
+  }, [countTrialId, countKind, editIdx]);
 
   useEffect(() => {
     const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
@@ -1236,6 +1228,9 @@ export default function App() {
     const d = calcDat(day0, countDate);
     if (d === null) return alert("Informe datas válidas para Dia 0 e para a contagem.");
     if (d < 0) return alert("A data da contagem não pode ser anterior ao Dia 0.");
+    const preset = getTrialPreset(countTrialId, countKind);
+    const nRolos = Number(countRolosCount);
+    const nSeeds = Number(countSeedsPerRolo);
     const entry = {
       dat: d,
       grid,
@@ -1243,8 +1238,8 @@ export default function App() {
       kind: countKind,
       trialId: countTrialId,
       mountingId: activeMountingId || "default",
-      rolosCount: countRolosCount,
-      seedsPerRolo: countSeedsPerRolo,
+      rolosCount: Number.isFinite(nRolos) && nRolos > 0 ? Math.floor(nRolos) : preset.rolosCount,
+      seedsPerRolo: Number.isFinite(nSeeds) && nSeeds > 0 ? Math.floor(nSeeds) : preset.seedsPerRolo,
       savedAt: new Date().toISOString(),
     };
     let next;
@@ -1327,13 +1322,12 @@ export default function App() {
     const dd = String(today.getDate()).padStart(2, "0");
     setCountDate(`${yyyy}-${mm}-${dd}`);
     setCountKind("vigor");
-    const mounting = mountings.find((m) => m.id === (activeMountingId || "default")) || mountings[0];
-    const trialId = mounting?.trialId || countTrialId;
+    const trialId = countTrialId || "principal";
     const preset = getTrialPreset(trialId, "vigor");
-    const rolosCount = mounting?.rolosCount || preset.rolosCount;
+    const rolosCount = preset.rolosCount;
     setCountTrialId(trialId);
     setCountRolosCount(rolosCount);
-    setCountSeedsPerRolo(mounting?.seedsPerRolo || preset.seedsPerRolo);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
     setDat(""); setGrid(emptyGrid(makeRolos(rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
@@ -1342,13 +1336,12 @@ export default function App() {
   const startNewAtDate = (isoDate) => {
     setCountDate(isoDate);
     setCountKind("vigor");
-    const mounting = mountings.find((m) => m.id === (activeMountingId || "default")) || mountings[0];
-    const trialId = mounting?.trialId || countTrialId;
+    const trialId = countTrialId || "principal";
     const preset = getTrialPreset(trialId, "vigor");
-    const rolosCount = mounting?.rolosCount || preset.rolosCount;
+    const rolosCount = preset.rolosCount;
     setCountTrialId(trialId);
     setCountRolosCount(rolosCount);
-    setCountSeedsPerRolo(mounting?.seedsPerRolo || preset.seedsPerRolo);
+    setCountSeedsPerRolo(preset.seedsPerRolo);
     setDat(""); setGrid(emptyGrid(makeRolos(rolosCount))); setEditIdx(null);
     setEditFocus(null);
     setActiveTreat("T0"); setView("entry");
@@ -1558,13 +1551,6 @@ export default function App() {
           onChangeMounting={(nextId) => {
             const id = String(nextId || "").trim() || "default";
             setActiveMountingId(id);
-            const m = mountings.find((x) => x.id === id);
-            if (!m) return;
-            const trialId = m.trialId || "principal";
-            const preset = getTrialPreset(trialId, countKind);
-            setCountTrialId(trialId);
-            setCountRolosCount(m.rolosCount || preset.rolosCount);
-            setCountSeedsPerRolo(m.seedsPerRolo || preset.seedsPerRolo);
           }}
           openMountingModal={() => setShowMounting(true)}
           activeTreat={activeTreat} setActiveTreat={setActiveTreat}
@@ -1638,7 +1624,8 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
   const lastAutoFocusKeyRef = useRef("");
   const exportSheetRef = useRef(null);
   const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
-  const seedsPerRolo = Number(countSeedsPerRolo || 0) || getTrialPreset(countTrialId, countKind).seedsPerRolo;
+  const preset = getTrialPreset(countTrialId, countKind);
+  const seedsPerRolo = Number(countSeedsPerRolo || 0) || preset.seedsPerRolo;
   const datLabel = String(dat || (day0 && countDate ? (calcDat(day0, countDate) ?? "") : "") || "").trim();
   const activeMounting = (mountings || []).find((m) => m.id === (activeMountingId || "default")) || (mountings || [])[0] || null;
 
@@ -1926,6 +1913,30 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
               >
                 Sem vermiculita
               </button>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Rolos:</span>
+              <input
+                value={countRolosCount}
+                onChange={(e) => setCountRolosCount(e.target.value.replace(/[^\d]/g, ""))}
+                inputMode="numeric"
+                placeholder={String(preset.rolosCount)}
+                disabled={editIdx !== null}
+                style={{ ...inputStyle, width: 80, textAlign: "center" }}
+              />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Sementes/rolo:</span>
+              <input
+                value={countSeedsPerRolo}
+                onChange={(e) => setCountSeedsPerRolo(e.target.value.replace(/[^\d]/g, ""))}
+                inputMode="numeric"
+                placeholder={String(preset.seedsPerRolo)}
+                disabled={editIdx !== null}
+                style={{ ...inputStyle, width: 120, textAlign: "center" }}
+              />
             </div>
           </div>
           <InfoTooltip text={INFO_TEXTS.ultimaContagem} />
@@ -2815,17 +2826,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
 
 function MountingModal({ day0, mountings, onClose, onAdd }) {
   const [mountDate, setMountDate] = useState(day0 || "");
-  const [trialId, setTrialId] = useState("principal");
-  const preset = getTrialPreset(trialId, "vigor");
-  const [rolosCount, setRolosCount] = useState(String(preset.rolosCount));
-  const [seedsPerRolo, setSeedsPerRolo] = useState(String(preset.seedsPerRolo));
   const [label, setLabel] = useState("");
-
-  useEffect(() => {
-    const next = getTrialPreset(trialId, "vigor");
-    setRolosCount(String(next.rolosCount));
-    setSeedsPerRolo(String(next.seedsPerRolo));
-  }, [trialId]);
 
   const canSave = Boolean(String(mountDate || "").trim());
 
@@ -2869,50 +2870,16 @@ function MountingModal({ day0, mountings, onClose, onAdd }) {
         </div>
 
         <div style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS, lineHeight: 1.5, marginBottom: 12 }}>
-          Cada montagem representa um conjunto de rolos montados em uma data. As contagens (análises) ficam associadas à montagem selecionada.
+          Cada montagem representa um conjunto de rolos montados em uma data. As contagens (análises) ficam associadas à montagem selecionada. A quantidade de rolos e sementes é definida na Nova Contagem.
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Data da montagem:</label>
             <input
               type="date"
               value={mountDate}
               onChange={(e) => setMountDate(e.target.value)}
-              style={{ ...inputStyle, width: "100%", textAlign: "center" }}
-            />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Ensaio:</label>
-            <select
-              value={trialId}
-              onChange={(e) => setTrialId(e.target.value)}
-              style={{ ...inputStyle, width: "100%", textAlign: "left" }}
-            >
-              <option value="principal">Principal</option>
-              <option value="sem_vermiculita">Sem vermiculita</option>
-            </select>
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Rolos:</label>
-            <input
-              value={rolosCount}
-              onChange={(e) => setRolosCount(e.target.value.replace(/[^\d]/g, ""))}
-              inputMode="numeric"
-              placeholder={String(preset.rolosCount)}
-              style={{ ...inputStyle, width: "100%", textAlign: "center" }}
-            />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Sementes/rolo:</label>
-            <input
-              value={seedsPerRolo}
-              onChange={(e) => setSeedsPerRolo(e.target.value.replace(/[^\d]/g, ""))}
-              inputMode="numeric"
-              placeholder={String(preset.seedsPerRolo)}
               style={{ ...inputStyle, width: "100%", textAlign: "center" }}
             />
           </div>
@@ -2966,14 +2933,9 @@ function MountingModal({ day0, mountings, onClose, onAdd }) {
             onClick={() => {
               const id = generateMountingId();
               const d = String(mountDate || "").trim();
-              const nRolos = Number(rolosCount);
-              const nSeeds = Number(seedsPerRolo);
               const next = {
                 id,
                 mountDate: d,
-                trialId,
-                rolosCount: Number.isFinite(nRolos) && nRolos > 0 ? nRolos : preset.rolosCount,
-                seedsPerRolo: Number.isFinite(nSeeds) && nSeeds > 0 ? nSeeds : preset.seedsPerRolo,
                 label: String(label || "").trim() || (d ? `Montagem ${formatPtBrDate(d)}` : "Montagem"),
               };
               onAdd?.(next);
