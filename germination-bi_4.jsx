@@ -73,9 +73,16 @@ const SUPABASE_COUNTS_TABLE = "germinacao_counts";
 const SUPABASE_MOISTURE_TABLE = "germinacao_moisture";
 const DEFAULT_DAY0 = "2026-04-11";
 
+function normalizeWorkspaceCode(value) {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .trim()
+    .toUpperCase();
+}
+
 function getStoredWorkspaceCode() {
   try {
-    return String(localStorage.getItem(WORKSPACE_CODE_KEY) || "").trim();
+    return normalizeWorkspaceCode(localStorage.getItem(WORKSPACE_CODE_KEY) || "");
   } catch {
     return "";
   }
@@ -114,11 +121,12 @@ function withTimeout(promise, ms, label) {
 
 async function loadSupabaseMeta(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
-  if (!String(deviceId || "").trim()) return null;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return null;
   const tryFull = await supabase
     .from(SUPABASE_META_TABLE)
     .select("day0,mountings")
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .maybeSingle();
   if (!tryFull.error) {
     return { day0: tryFull.data?.day0 || null, mountings: tryFull.data?.mountings ?? null };
@@ -126,33 +134,36 @@ async function loadSupabaseMeta(deviceId) {
   const tryLegacy = await supabase
     .from(SUPABASE_META_TABLE)
     .select("day0")
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .maybeSingle();
-  if (tryLegacy.error) return null;
+  if (tryLegacy.error) throw new Error("Não foi possível carregar o ensaio no Supabase.");
   return { day0: tryLegacy.data?.day0 || null, mountings: null };
 }
 
 async function saveSupabaseMeta(deviceId, payload) {
   if (!isSupabaseConfigured || !supabase) return;
-  if (!String(deviceId || "").trim()) return;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return;
   const day0 = payload?.day0 ?? null;
   const mountings = payload?.mountings ?? null;
   const full = await supabase
     .from(SUPABASE_META_TABLE)
-    .upsert({ device_id: deviceId, day0, mountings }, { onConflict: "device_id" });
+    .upsert({ device_id: id, day0, mountings }, { onConflict: "device_id" });
   if (!full.error) return;
-  await supabase
+  const legacy = await supabase
     .from(SUPABASE_META_TABLE)
-    .upsert({ device_id: deviceId, day0 }, { onConflict: "device_id" });
+    .upsert({ device_id: id, day0 }, { onConflict: "device_id" });
+  if (legacy.error) throw new Error("Não foi possível salvar o ensaio no Supabase.");
 }
 
 async function loadSupabaseCounts(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
-  if (!String(deviceId || "").trim()) return null;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return null;
   const tryFull = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .select("trial_code, kind, mounting_id, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .order("dat", { ascending: true });
   if (!tryFull.error) {
     const data = tryFull.data || [];
@@ -171,9 +182,9 @@ async function loadSupabaseCounts(deviceId) {
   const tryLegacy = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .select("trial_code, kind, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .order("dat", { ascending: true });
-  if (tryLegacy.error) return null;
+  if (tryLegacy.error) throw new Error("Não foi possível carregar contagens do Supabase.");
   const data = tryLegacy.data || [];
   return data.map((row) => ({
     dat: row.dat,
@@ -190,12 +201,13 @@ async function loadSupabaseCounts(deviceId) {
 
 async function upsertSupabaseCount(deviceId, entry) {
   if (!isSupabaseConfigured || !supabase) return;
-  if (!String(deviceId || "").trim()) return;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   const mountingId = getCountMountingId(entry);
   const payloadFull = {
-    device_id: deviceId,
+    device_id: id,
     trial_code: trialId,
     kind,
     mounting_id: mountingId,
@@ -210,11 +222,11 @@ async function upsertSupabaseCount(deviceId, entry) {
     .from(SUPABASE_COUNTS_TABLE)
     .upsert(payloadFull, { onConflict: "device_id,trial_code,kind,mounting_id,dat" });
   if (!full.error) return;
-  await supabase
+  const legacy = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .upsert(
       {
-        device_id: deviceId,
+        device_id: id,
         trial_code: trialId,
         kind,
         dat: Number(entry.dat),
@@ -226,18 +238,20 @@ async function upsertSupabaseCount(deviceId, entry) {
       },
       { onConflict: "device_id,trial_code,kind,dat" }
     );
+  if (legacy.error) throw new Error("Não foi possível salvar a contagem no Supabase.");
 }
 
 async function deleteSupabaseCount(deviceId, entry) {
   if (!isSupabaseConfigured || !supabase) return;
-  if (!String(deviceId || "").trim()) return;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return;
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   const mountingId = getCountMountingId(entry);
   const full = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .delete()
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .eq("trial_code", trialId)
     .eq("kind", kind)
     .eq("mounting_id", mountingId)
@@ -246,7 +260,7 @@ async function deleteSupabaseCount(deviceId, entry) {
   await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .delete()
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .eq("trial_code", trialId)
     .eq("kind", kind)
     .eq("dat", Number(entry.dat));
@@ -254,14 +268,15 @@ async function deleteSupabaseCount(deviceId, entry) {
 
 async function loadSupabaseMoisture(deviceId) {
   if (!isSupabaseConfigured || !supabase) return null;
-  if (!String(deviceId || "").trim()) return null;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return null;
   const { data, error } = await supabase
     .from(SUPABASE_MOISTURE_TABLE)
     .select("rep_label, m1, m2, m3")
-    .eq("device_id", deviceId)
+    .eq("device_id", id)
     .eq("trial_code", "principal")
     .order("rep_label", { ascending: true });
-  if (error) return null;
+  if (error) throw new Error("Não foi possível carregar umidade do Supabase.");
   return (data || []).map((row) => ({
     id: row.rep_label,
     m1: row.m1 ?? "",
@@ -272,9 +287,10 @@ async function loadSupabaseMoisture(deviceId) {
 
 async function upsertSupabaseMoistureRows(deviceId, rows) {
   if (!isSupabaseConfigured || !supabase) return;
-  if (!String(deviceId || "").trim()) return;
+  const id = normalizeWorkspaceCode(deviceId);
+  if (!id) return;
   const payload = (rows || []).map((r) => ({
-    device_id: deviceId,
+    device_id: id,
     trial_code: "principal",
     rep_label: r.id,
     m1: r.m1 === "" ? null : Number(r.m1),
@@ -282,9 +298,10 @@ async function upsertSupabaseMoistureRows(deviceId, rows) {
     m3: r.m3 === "" ? null : Number(r.m3),
   }));
   if (!payload.length) return;
-  await supabase
+  const res = await supabase
     .from(SUPABASE_MOISTURE_TABLE)
     .upsert(payload, { onConflict: "device_id,trial_code,rep_label" });
+  if (res.error) throw new Error("Não foi possível salvar umidade no Supabase.");
 }
 
 function parseDateInput(value) {
@@ -924,6 +941,7 @@ export default function App() {
   const [showTrial, setShowTrial]     = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [loadingError, setLoadingError] = useState("");
+  const [supabaseSyncError, setSupabaseSyncError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const countsRef                     = useRef([]);
   const supabaseMetaTimerRef          = useRef(null);
@@ -1020,7 +1038,9 @@ export default function App() {
     supabaseMetaSignatureRef.current = signature;
     if (supabaseMetaTimerRef.current) clearTimeout(supabaseMetaTimerRef.current);
     supabaseMetaTimerRef.current = setTimeout(() => {
-      saveSupabaseMeta(deviceId, { day0: day0 || null, mountings: mountings || [] });
+      saveSupabaseMeta(deviceId, { day0: day0 || null, mountings: mountings || [] })
+        .then(() => setSupabaseSyncError(""))
+        .catch((err) => setSupabaseSyncError(err?.message || "Não foi possível sincronizar o ensaio no Supabase."));
     }, 600);
   }, [day0, mountings, workspaceCode, loading]);
 
@@ -1034,7 +1054,9 @@ export default function App() {
     supabaseMoistureSignatureRef.current = signature;
     if (supabaseMoistureTimerRef.current) clearTimeout(supabaseMoistureTimerRef.current);
     supabaseMoistureTimerRef.current = setTimeout(() => {
-      upsertSupabaseMoistureRows(deviceId, moistureRows);
+      upsertSupabaseMoistureRows(deviceId, moistureRows)
+        .then(() => setSupabaseSyncError(""))
+        .catch((err) => setSupabaseSyncError(err?.message || "Não foi possível sincronizar a umidade no Supabase."));
     }, 650);
   }, [moistureRows, workspaceCode, loading]);
 
@@ -1268,7 +1290,13 @@ export default function App() {
         getCountMountingId(previous) !== getCountMountingId(entry);
       if (changedKey) await deleteSupabaseCount(workspaceCodeRef.current, previous);
     }
-    await upsertSupabaseCount(workspaceCodeRef.current, entry);
+    try {
+      await upsertSupabaseCount(workspaceCodeRef.current, entry);
+      setSupabaseSyncError("");
+    } catch (err) {
+      setSupabaseSyncError(err?.message || "Não foi possível sincronizar a contagem no Supabase.");
+      alert("Contagem salva neste dispositivo, mas não foi possível sincronizar no Supabase. Verifique a configuração/permissões (RLS).");
+    }
     setSaved(true);
     setTimeout(() => { setSaved(false); setView("dashboard"); setEditIdx(null); }, 1200);
   };
@@ -1306,7 +1334,7 @@ export default function App() {
 
   const clearWorkspaceData = async (deviceId) => {
     if (!isSupabaseConfigured || !supabase) throw new Error("Supabase não configurado.");
-    const id = String(deviceId || "").trim();
+    const id = normalizeWorkspaceCode(deviceId);
     if (!id) throw new Error("Código inválido.");
 
     await supabase.from(SUPABASE_COUNTS_TABLE).delete().eq("device_id", id);
@@ -1522,6 +1550,31 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      {supabaseSyncError ? (
+        <div style={{ padding: "10px 24px", background: "#b69b6a11", borderBottom: `1px solid ${UI.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12, color: "#7b5a19", fontFamily: FONT_SANS }}>
+              {supabaseSyncError}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn"
+                onClick={() => { setLoading(true); setReloadKey(k => k + 1); }}
+                style={{ background: "transparent", border: `1px solid ${UI.border}`, borderRadius: 10, padding: "8px 10px", fontSize: 12, fontFamily: FONT_SANS, color: UI.textSoft }}
+              >
+                Recarregar
+              </button>
+              <button
+                className="btn"
+                onClick={() => setShowTrial(true)}
+                style={{ background: "transparent", border: `1px solid ${UI.border}`, borderRadius: 10, padding: "8px 10px", fontSize: 12, fontFamily: FONT_SANS, color: UI.textSoft }}
+              >
+                Abrir Ensaio
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* ════ ROTEAMENTO DE TELAS ════════════════════════════════════
           Em vez de um router externo, usamos condicionais simples */}
@@ -1565,7 +1618,7 @@ export default function App() {
         <TrialSetupModal
           workspaceCode={workspaceCode}
           applyWorkspaceCode={(nextCode, nextDay0) => {
-            const cleaned = String(nextCode || "").trim();
+            const cleaned = normalizeWorkspaceCode(nextCode);
             if (!cleaned) return;
             const d0 = String(nextDay0 || "").trim() || DEFAULT_DAY0;
             pendingInitRef.current = { code: cleaned, day0: d0 };
@@ -2650,7 +2703,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
 }
 
 function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, clearWorkspaceData, onClose }) {
-  const [code, setCode] = useState(workspaceCode || "");
+  const [code, setCode] = useState(normalizeWorkspaceCode(workspaceCode || ""));
   const [value, setValue] = useState(day0 || DEFAULT_DAY0);
 
   return (
@@ -2700,7 +2753,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
           <label style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Código:</label>
           <input
             value={code}
-            onChange={(e) => setCode(e.target.value)}
+            onChange={(e) => setCode(normalizeWorkspaceCode(e.target.value))}
             placeholder="ex: ENSAIO-2026-A"
             style={{ ...inputStyle, width: 220, textAlign: "center", textTransform: "uppercase" }}
           />
@@ -2728,7 +2781,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
           <button
             className="btn"
             onClick={() => {
-              const txt = String(code || "").trim();
+              const txt = normalizeWorkspaceCode(code);
               if (!txt) return;
               try { navigator.clipboard.writeText(txt); } catch {}
             }}
@@ -2758,7 +2811,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
             <button
               className="btn"
               onClick={async () => {
-                const txt = String(code || "").trim();
+                const txt = normalizeWorkspaceCode(code);
                 if (!txt) return;
                 if (!window.confirm("Isso vai APAGAR todos os dados deste código no Supabase. Continuar?")) return;
                 try {
