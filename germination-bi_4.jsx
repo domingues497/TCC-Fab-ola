@@ -23,7 +23,8 @@ import {
   CartesianGrid,           // Grade de fundo do gráfico
   Tooltip, Legend,         // Dica ao passar o mouse + legenda
   ResponsiveContainer,     // Faz o gráfico se adaptar ao tamanho da tela
-  ReferenceLine            // Linha de referência (ex: 50%)
+  ReferenceLine,           // Linha de referência (ex: 50%)
+  LabelList
 } from "recharts";
 
 // ─── CONSTANTES GLOBAIS ──────────────────────────────────────────
@@ -2205,6 +2206,26 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
   const trendChartRef = useRef(null);
   const distChartRef = useRef(null);
   const roloChartRef = useRef(null);
+  const barValueLabel = ({ x, y, width, height, value, fill }) => {
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    if (Number(height) < 14) return null;
+    const cx = Number(x) + Number(width) / 2;
+    const cy = Number(y) + Number(height) / 2;
+    return (
+      <text
+        x={cx}
+        y={cy}
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fill={fill || "#ffffff"}
+        style={{ fontFamily: FONT_SANS, fontSize: 10, fontWeight: 800 }}
+      >
+        {v}
+      </text>
+    );
+  };
+  const pctLabel = (v) => `${v}%`;
 
   // Ordena por DAT crescente para os gráficos de linha
   const activeId = String(activeMountingId || "").trim() || "default";
@@ -2320,7 +2341,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
 
   const exportPng = async (ref, baseName) => {
     try {
-      await exportFirstSvgAsPng(ref?.current, `${baseName}.png`);
+      await exportHtmlAsPng(ref?.current, `${baseName}.png`, { background: "#ffffff", pixelRatio: 2 });
     } catch (err) {
       alert(err?.message || "Não foi possível exportar o PNG.");
     }
@@ -2328,10 +2349,51 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
 
   const exportRoloPngAllTreatments = async () => {
     const datLabel = latest?.dat || "atual";
-    for (const t of TREATMENTS) {
-      setSelT(t.id);
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      await exportPng(roloChartRef, `variacao_rolo_${t.id}_dat_${datLabel}`);
+    try {
+      const captures = [];
+      const oldSel = selT;
+      for (const t of TREATMENTS) {
+        setSelT(t.id);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        if (!roloChartRef.current) continue;
+        const canvas = await html2canvas(roloChartRef.current, {
+          backgroundColor: "#ffffff",
+          scale: 2,
+          useCORS: true,
+          logging: false,
+        });
+        captures.push({ id: t.id, canvas });
+      }
+      setSelT(oldSel);
+      if (!captures.length) throw new Error("Nada para exportar.");
+
+      const width = Math.max(...captures.map((c) => c.canvas.width));
+      const height = captures.reduce((sum, c) => sum + c.canvas.height, 0);
+      const out = document.createElement("canvas");
+      out.width = width;
+      out.height = height;
+      const ctx = out.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, out.width, out.height);
+      let y = 0;
+      captures.forEach((c) => {
+        ctx.drawImage(c.canvas, 0, y);
+        y += c.canvas.height;
+      });
+
+      const blob = await new Promise((resolve) => out.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Não foi possível gerar o PNG.");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = sanitizeFileName(`dashboard_variacao_rolo_todos_tratamentos_dat_${datLabel}.png`);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err?.message || "Não foi possível exportar o PNG.");
     }
   };
 
@@ -2551,9 +2613,15 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
               <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} domain={[0, 80]} unit="%" axisLine={false} tickLine={false} />
               <Tooltip content={<ChartTip />} />
               <Legend wrapperStyle={{ fontSize: 10, fontFamily: FONT_SANS }} />
-              <Bar dataKey="Normais"  fill="#6fa58b" radius={[4,4,0,0]} />
-              <Bar dataKey="Anormais" fill="#b69b6a" radius={[4,4,0,0]} />
-              <Bar dataKey="Mortas"   fill="#c47b6a" radius={[4,4,0,0]} />
+              <Bar dataKey="Normais"  fill="#6fa58b" radius={[4,4,0,0]}>
+                <LabelList position="top" formatter={pctLabel} style={{ fontFamily: FONT_SANS, fontSize: 10, fill: "#334155", fontWeight: 800 }} />
+              </Bar>
+              <Bar dataKey="Anormais" fill="#b69b6a" radius={[4,4,0,0]}>
+                <LabelList position="top" formatter={pctLabel} style={{ fontFamily: FONT_SANS, fontSize: 10, fill: "#334155", fontWeight: 800 }} />
+              </Bar>
+              <Bar dataKey="Mortas"   fill="#c47b6a" radius={[4,4,0,0]}>
+                <LabelList position="top" formatter={pctLabel} style={{ fontFamily: FONT_SANS, fontSize: 10, fill: "#334155", fontWeight: 800 }} />
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -2616,9 +2684,15 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
             <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 9, fontFamily: FONT_SANS }} axisLine={false} tickLine={false} />
             <YAxis tick={{ fill: "#6b7280", fontSize: 9 }} domain={[0, seedsLatest]} axisLine={false} tickLine={false} />
             <Tooltip contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, fontSize: 11 }} />
-            <Bar dataKey="N" name="Normais"  fill="#6fa58b" radius={[3,3,0,0]} stackId="a" />
-            <Bar dataKey="A" name="Anormais" fill="#b69b6a" radius={[0,0,0,0]} stackId="a" />
-            <Bar dataKey="M" name="Mortas"   fill="#c47b6a" radius={[0,0,3,3]} stackId="a" />
+            <Bar dataKey="N" name="Normais" fill="#6fa58b" radius={[3,3,0,0]} stackId="a">
+              <LabelList content={(p) => barValueLabel({ ...p, fill: "#ffffff" })} />
+            </Bar>
+            <Bar dataKey="A" name="Anormais" fill="#b69b6a" radius={[0,0,0,0]} stackId="a">
+              <LabelList content={(p) => barValueLabel({ ...p, fill: "#ffffff" })} />
+            </Bar>
+            <Bar dataKey="M" name="Mortas" fill="#c47b6a" radius={[0,0,3,3]} stackId="a">
+              <LabelList content={(p) => barValueLabel({ ...p, fill: "#ffffff" })} />
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -2868,7 +2942,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
                 color: "#fff",
               }}
             >
-              Salvar
+              Abrir
             </button>
           </div>
         </div>
