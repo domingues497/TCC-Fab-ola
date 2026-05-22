@@ -917,6 +917,7 @@ export default function App() {
   const [workspaceCode, setWorkspaceCode] = useState(getStoredWorkspaceCode());
   const workspaceCodeRef = useRef(workspaceCode);
   const pendingInitRef = useRef(null);
+  const autoFillTargetRef = useRef({});
   const initialTrialId = "principal";
   const initialKind = "vigor";
   const initialPreset = getTrialPreset(initialTrialId, initialKind);
@@ -1245,7 +1246,8 @@ export default function App() {
   }, [loading, day0, workspaceCode]);
 
   // ── SALVAR CONTAGEM ──────────────────────────────────────────────
-  const handleSave = async () => {
+  const handleSave = async (opts = {}) => {
+    const sair = typeof opts?.sair === "boolean" ? opts.sair : true;
     if (!day0) return alert("Informe a data do Dia 0 (tratamento) para calcular o DAT.");
     if (!countDate) return alert("Informe a data da contagem.");
     const d = calcDat(day0, countDate);
@@ -1299,7 +1301,21 @@ export default function App() {
       alert("Contagem salva neste dispositivo, mas não foi possível sincronizar no Supabase. Verifique a configuração/permissões (RLS).");
     }
     setSaved(true);
-    setTimeout(() => { setSaved(false); setView("dashboard"); setEditIdx(null); }, 1200);
+    const key = (c) =>
+      Number(c?.dat) === Number(entry.dat) &&
+      getCountKind(c) === getCountKind(entry) &&
+      getCountTrialId(c) === getCountTrialId(entry) &&
+      getCountMountingId(c) === getCountMountingId(entry);
+    const savedIndex = next.findIndex(key);
+    setTimeout(() => {
+      setSaved(false);
+      if (sair) {
+        setView("dashboard");
+        setEditIdx(null);
+      } else {
+        if (savedIndex >= 0) setEditIdx(savedIndex);
+      }
+    }, 1200);
   };
 
   // ── INICIAR EDIÇÃO ───────────────────────────────────────────────
@@ -1379,22 +1395,51 @@ export default function App() {
   // ── ATUALIZAR CÉLULA ─────────────────────────────────────────────
   // Spread operator (...) garante imutabilidade (não altera o estado diretamente)
   const setCell = (rolo, tipo, val) => {
-    setGrid(prev => ({
-      ...prev,
-      [activeTreat]: {
-        ...prev[activeTreat],
-        [rolo]: { ...prev[activeTreat][rolo], [tipo]: val === "" ? "" : Number(val) }
-      }
-    }));
-  };
+    const preset = getTrialPreset(countTrialId, countKind);
+    const seeds = Number(countSeedsPerRolo || 0) || preset.seedsPerRolo;
+    setGrid(prev => {
+      const current = prev?.[activeTreat]?.[rolo] || { N: "", A: "", M: "" };
+      const nextVal = val === "" ? "" : Number(val);
 
-  // ── PREENCHER MORTAS AUTOMATICAMENTE ────────────────────────────
-  // M = 25 - N - A (cada rolo tem 25 sementes)
-  const fillM = (rolo) => {
-    const n = Number(grid[activeTreat]?.[rolo]?.N || 0);
-    const a = Number(grid[activeTreat]?.[rolo]?.A || 0);
-    const m = Number(countSeedsPerRolo || 0) - n - a;
-    if (m >= 0) setCell(rolo, "M", m);
+      const key = `${activeTreat}|${rolo}`;
+      if (tipo === "N") autoFillTargetRef.current[key] = "M";
+      if (tipo === "M") autoFillTargetRef.current[key] = "N";
+
+      const target = autoFillTargetRef.current[key] || "M";
+
+      const oldN = Number(current.N || 0);
+      const oldA = Number(current.A || 0);
+      const oldM = Number(current.M || 0);
+      const oldRemForTarget = target === "N"
+        ? (seeds - oldA - oldM)
+        : (seeds - oldN - oldA);
+
+      const nextCell = { ...current, [tipo]: nextVal };
+      const nextN = Number(nextCell.N || 0);
+      const nextA = Number(nextCell.A || 0);
+      const nextM = Number(nextCell.M || 0);
+      const nextRemForTarget = target === "N"
+        ? (seeds - nextA - nextM)
+        : (seeds - nextN - nextA);
+
+      const curTargetVal = nextCell[target];
+      const curTargetNum = curTargetVal === "" ? null : Number(curTargetVal);
+      const canOverwriteTarget =
+        curTargetVal === "" ||
+        (Number.isFinite(curTargetNum) && Number.isFinite(oldRemForTarget) && curTargetNum === oldRemForTarget);
+
+      if (canOverwriteTarget && Number.isFinite(nextRemForTarget) && nextRemForTarget >= 0) {
+        nextCell[target] = Math.floor(nextRemForTarget);
+      }
+
+      return {
+        ...prev,
+        [activeTreat]: {
+          ...prev[activeTreat],
+          [rolo]: nextCell
+        }
+      };
+    });
   };
 
   if (!isSupabaseConfigured || !supabase) return (
@@ -1608,7 +1653,7 @@ export default function App() {
           }}
           openMountingModal={() => setShowMounting(true)}
           activeTreat={activeTreat} setActiveTreat={setActiveTreat}
-          setCell={setCell} fillM={fillM}
+          setCell={setCell}
           saved={saved} editIdx={editIdx}
           editFocus={editFocus}
           handleSave={handleSave}
@@ -1671,11 +1716,12 @@ export default function App() {
 // COMPONENTE: EntryView — Formulário de entrada de dados
 // Exibe grade N/A/M × R1-R12 por tratamento (selecionado via abas)
 // ══════════════════════════════════════════════════════════════════
-function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, mountings, activeMountingId, onChangeMounting, openMountingModal, grid, activeTreat, setActiveTreat, setCell, fillM, saved, editIdx, editFocus, handleSave, onCancel }) {
+function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, mountings, activeMountingId, onChangeMounting, openMountingModal, grid, activeTreat, setActiveTreat, setCell, saved, editIdx, editFocus, handleSave, onCancel }) {
   const inputRefs = useRef({});
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
   const lastAutoFocusKeyRef = useRef("");
+  const navModeRef = useRef("normal");
   const exportSheetRef = useRef(null);
   const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
   const preset = getTrialPreset(countTrialId, countKind);
@@ -1749,16 +1795,19 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     }, 0);
   }, [editIdx, editFocus, activeTreat]);
 
+  const getTipoOrder = () => (navModeRef.current === "reverse" ? ["M", "A", "N"] : TIPOS);
+
   const nextCoords = (rolo, tipo) => {
     const roloIdx = rolos.indexOf(rolo);
-    const tipoIdx = TIPOS.indexOf(tipo);
+    const tipos = getTipoOrder();
+    const tipoIdx = tipos.indexOf(tipo);
     if (roloIdx < 0 || tipoIdx < 0) return null;
 
     let nextRolo = rolo;
-    let nextTipo = TIPOS[tipoIdx + 1];
+    let nextTipo = tipos[tipoIdx + 1];
     if (!nextTipo) {
       nextRolo = rolos[roloIdx + 1];
-      nextTipo = TIPOS[0];
+      nextTipo = tipos[0];
     }
     if (!nextRolo || !nextTipo) return null;
     return { rolo: nextRolo, tipo: nextTipo };
@@ -1766,14 +1815,15 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
 
   const prevCoords = (rolo, tipo) => {
     const roloIdx = rolos.indexOf(rolo);
-    const tipoIdx = TIPOS.indexOf(tipo);
+    const tipos = getTipoOrder();
+    const tipoIdx = tipos.indexOf(tipo);
     if (roloIdx < 0 || tipoIdx < 0) return null;
 
     let prevRolo = rolo;
-    let prevTipo = TIPOS[tipoIdx - 1];
+    let prevTipo = tipos[tipoIdx - 1];
     if (!prevTipo) {
       prevRolo = rolos[roloIdx - 1];
-      prevTipo = TIPOS[TIPOS.length - 1];
+      prevTipo = tipos[tipos.length - 1];
     }
     if (!prevRolo || !prevTipo) return null;
     return { rolo: prevRolo, tipo: prevTipo };
@@ -1822,6 +1872,9 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     if (num > seedsPerRolo) num = seedsPerRolo;
 
     setCell(rolo, tipo, String(num));
+
+    if (tipo === "M") navModeRef.current = "reverse";
+    if (tipo === "N") navModeRef.current = "normal";
 
     const shouldAdvanceNow = digits.length >= 2 || num >= 10;
     if (shouldAdvanceNow) {
@@ -2040,7 +2093,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                     {tp}: {sums[tp]}
                   </span>
                 ))}
-                <span style={{ color: UI.textSoft }}>Total: {sums.total}/{rolos.length * 25}</span>
+                <span style={{ color: UI.textSoft }}>Total: {sums.total}/{rolos.length * seedsPerRolo}</span>
               </div>
             </div>
 
@@ -2073,38 +2126,19 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                         value={grid[activeTreat]?.[r]?.[tipo] ?? ""}
                         onChange={e => handleCellChange(r, tipo, e.target.value)}
                         onKeyDown={e => handleCellKeyDown(r, tipo, e)}
-                        onFocus={(e) => e.target.select()}
+                        onFocus={(e) => {
+                          if (tipo === "M") navModeRef.current = "reverse";
+                          if (tipo === "N") navModeRef.current = "normal";
+                          e.target.select();
+                        }}
                         style={{ borderColor: (grid[activeTreat]?.[r]?.[tipo] ?? "") !== "" ? `${TIPO_COLORS[tipo]}66` : UI.border }}
                       />
                     ))}
                   </div>
                 ))}
 
-                {/* Linha de preenchimento automático: M = 25 - N - A */}
-                <div style={{ display: "grid", gridTemplateColumns: `70px repeat(${rolos.length}, 1fr)`, gap: 6, marginTop: 4 }}>
-                  <div style={{ fontSize: 9, color: UI.textSoft, textAlign: "right", paddingRight: 8, paddingTop: 6 }}>auto M ▼</div>
-                  {rolos.map(r => {
-                    const n = Number(grid[activeTreat]?.[r]?.N || 0);
-                    const a = Number(grid[activeTreat]?.[r]?.A || 0);
-                    const rem = seedsPerRolo - n - a;
-                    return (
-                      <button key={r} className="btn" onClick={() => fillM(r)}
-                        title={`Preencher Mortas = ${seedsPerRolo} - N - A`}
-                        style={{
-                          background: "transparent", border: `1px dashed ${UI.border}`,
-                          borderRadius: 5,
-                          color: rem < 0 ? "#c47b6a" : UI.textSoft, // Vermelho = ultrapassou 25
-                          fontSize: 10, fontFamily: FONT_SANS, height: 24, cursor: "pointer",
-                        }}
-                      >{rem < 0 ? "⚠" : rem}</button>
-                    );
-                  })}
-                </div>
               </div>
             </div>
-            <p style={{ fontSize: 10, color: UI.textSoft, marginTop: 8, fontFamily: FONT_SANS }}>
-              💡 Clique nos números "auto M" para preencher Mortas = 25 − N − A automaticamente
-            </p>
           </div>
         );
       })()}
@@ -2184,12 +2218,23 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
           background: "transparent", border: `1px solid ${UI.border}`, color: UI.textSoft,
           borderRadius: 8, padding: "10px 20px", fontSize: 13, fontFamily: FONT_SANS,
         }}>📷 PNG (T0–T3)</button>
-        <button className="btn" onClick={handleSave} style={{
+        <button className="btn" onClick={() => handleSave({ sair: false })} style={{
+          background: "transparent",
+          border: `1px solid ${UI.border}`,
+          borderRadius: 8,
+          padding: "10px 20px",
+          fontSize: 13,
+          fontFamily: FONT_SANS,
+          color: UI.textSoft,
+        }}>
+          {saved ? "✓ Salvo!" : "💾 Só salvar"}
+        </button>
+        <button className="btn" onClick={() => handleSave({ sair: true })} style={{
           background: saved ? "#6fa58b" : "linear-gradient(135deg, #8ca8bf, #6f93b5)",
           color: "#fff", border: "none", borderRadius: 8, padding: "10px 28px",
           fontSize: 13, fontFamily: FONT_SANS, fontWeight: 600,
         }}>
-          {saved ? "✓ Salvo!" : `💾 Salvar DAT ${dat || "?"}`}
+          {saved ? "✓ Salvo!" : "💾 Salvar e sair"}
         </button>
       </div>
     </div>
