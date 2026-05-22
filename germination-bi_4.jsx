@@ -2824,6 +2824,54 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
 function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, clearWorkspaceData, onClose }) {
   const [code, setCode] = useState(normalizeWorkspaceCode(workspaceCode || ""));
   const [value, setValue] = useState(day0 || DEFAULT_DAY0);
+  const [supabaseTestLoading, setSupabaseTestLoading] = useState(false);
+  const [supabaseTestResult, setSupabaseTestResult] = useState(null);
+  const [supabaseTestError, setSupabaseTestError] = useState("");
+
+  const testSupabase = async () => {
+    const id = normalizeWorkspaceCode(code);
+    if (!id) return;
+    if (!isSupabaseConfigured || !supabase) {
+      setSupabaseTestResult(null);
+      setSupabaseTestError("Supabase não configurado neste app.");
+      return;
+    }
+    setSupabaseTestLoading(true);
+    setSupabaseTestError("");
+    setSupabaseTestResult(null);
+    try {
+      const meta = await supabase
+        .from(SUPABASE_META_TABLE)
+        .select("day0")
+        .eq("device_id", id)
+        .maybeSingle();
+      if (meta.error) throw meta.error;
+
+      const countsRes = await supabase
+        .from(SUPABASE_COUNTS_TABLE)
+        .select("dat", { count: "exact", head: true })
+        .eq("device_id", id);
+      if (countsRes.error) throw countsRes.error;
+
+      const moistureRes = await supabase
+        .from(SUPABASE_MOISTURE_TABLE)
+        .select("rep_label", { count: "exact", head: true })
+        .eq("device_id", id);
+      if (moistureRes.error) throw moistureRes.error;
+
+      setSupabaseTestResult({
+        code: id,
+        metaFound: Boolean(meta.data),
+        day0: meta.data?.day0 || null,
+        countsCount: countsRes.count ?? null,
+        moistureCount: moistureRes.count ?? null,
+      });
+    } catch (err) {
+      setSupabaseTestError(err?.message || "Falha ao consultar o Supabase para este código.");
+    } finally {
+      setSupabaseTestLoading(false);
+    }
+  };
 
   return (
     <div
@@ -2926,6 +2974,24 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
             onChange={(e) => setValue(e.target.value)}
             style={{ ...inputStyle, width: 180, textAlign: "center" }}
           />
+          <button
+            className="btn"
+            disabled={supabaseTestLoading || !normalizeWorkspaceCode(code)}
+            onClick={testSupabase}
+            style={{
+              background: "transparent",
+              border: `1px solid ${UI.border}`,
+              borderRadius: 8,
+              padding: "10px 16px",
+              fontSize: 13,
+              fontFamily: FONT_SANS,
+              color: UI.textSoft,
+              opacity: supabaseTestLoading ? 0.7 : 1,
+              cursor: supabaseTestLoading ? "not-allowed" : "pointer",
+            }}
+          >
+            {supabaseTestLoading ? "Testando..." : "Testar Supabase"}
+          </button>
           <div style={{ display: "flex", gap: 10, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button
               className="btn"
@@ -2973,7 +3039,7 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
             <button
               className="btn"
               onClick={() => {
-                applyWorkspaceCode(code, value);
+                applyWorkspaceCode(normalizeWorkspaceCode(code), value);
                 onClose();
               }}
               style={{
@@ -2991,6 +3057,20 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
             </button>
           </div>
         </div>
+
+        {supabaseTestError ? (
+          <div style={{ marginTop: 10, fontSize: 12, color: "#9b3f31", fontFamily: FONT_SANS, lineHeight: 1.4 }}>
+            {supabaseTestError}
+          </div>
+        ) : null}
+        {supabaseTestResult ? (
+          <div style={{ marginTop: 10, fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS, lineHeight: 1.4 }}>
+            <div>Código: <b style={{ color: UI.text }}>{supabaseTestResult.code}</b></div>
+            <div>Meta: <b style={{ color: UI.text }}>{supabaseTestResult.metaFound ? "encontrada" : "não encontrada"}</b> · Dia 0: <b style={{ color: UI.text }}>{supabaseTestResult.day0 ? formatPtBrDate(supabaseTestResult.day0) : "—"}</b></div>
+            <div>Contagens (linhas no Supabase): <b style={{ color: UI.text }}>{supabaseTestResult.countsCount ?? "—"}</b></div>
+            <div>Umidade (linhas no Supabase): <b style={{ color: UI.text }}>{supabaseTestResult.moistureCount ?? "—"}</b></div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
