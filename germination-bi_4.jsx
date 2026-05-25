@@ -2827,6 +2827,9 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
   const [supabaseTestLoading, setSupabaseTestLoading] = useState(false);
   const [supabaseTestResult, setSupabaseTestResult] = useState(null);
   const [supabaseTestError, setSupabaseTestError] = useState("");
+  const supabaseHost = (() => {
+    try { return new URL(import.meta.env.VITE_SUPABASE_URL).hostname; } catch { return "—"; }
+  })();
 
   const testSupabase = async () => {
     const id = normalizeWorkspaceCode(code);
@@ -2867,7 +2870,13 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
         moistureCount: moistureRes.count ?? null,
       });
     } catch (err) {
-      setSupabaseTestError(err?.message || "Falha ao consultar o Supabase para este código.");
+      const parts = [];
+      const msg = err?.message || "Falha ao consultar o Supabase para este código.";
+      parts.push(msg);
+      if (err?.code) parts.push(`código: ${err.code}`);
+      if (err?.details) parts.push(String(err.details));
+      if (err?.hint) parts.push(String(err.hint));
+      setSupabaseTestError(parts.filter(Boolean).join(" · "));
     } finally {
       setSupabaseTestLoading(false);
     }
@@ -2914,6 +2923,9 @@ function TrialSetupModal({ workspaceCode, applyWorkspaceCode, day0, setDay0, cle
 
         <div style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS, lineHeight: 1.5, marginBottom: 12 }}>
           Use o mesmo código em outros dispositivos para todos acessarem o mesmo ensaio. Dia 0 = data em que os tratamentos foram aplicados. O DAT das contagens será calculado automaticamente a partir dessa data.
+        </div>
+        <div style={{ fontSize: 11, color: UI.textSoft, fontFamily: FONT_SANS, lineHeight: 1.4, marginBottom: 10 }}>
+          Supabase: <b style={{ color: UI.text }}>{isSupabaseConfigured ? "configurado" : "não configurado"}</b> · Host: <b style={{ color: UI.text }}>{supabaseHost}</b>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
