@@ -72,7 +72,113 @@ const WORKSPACE_CODE_KEY = "germinacao_device_id_v1";
 const SUPABASE_META_TABLE = "germinacao_meta";
 const SUPABASE_COUNTS_TABLE = "germinacao_counts";
 const SUPABASE_MOISTURE_TABLE = "germinacao_moisture";
+const SUPABASE_DIA_TABLE = "dia";
+const LAST_DIA_WRITTEN_KEY = "germinacao_dia_ultimo_v1";
 const DEFAULT_DAY0 = "2026-04-11";
+
+function todayLocalIso() {
+  const d = new Date();
+  const y = String(d.getFullYear()).padStart(4, "0");
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+async function ensureDiaHojeNoSupabase(force) {
+  if (!isSupabaseConfigured || !supabase) return;
+  const today = todayLocalIso();
+  if (!force) {
+    try {
+      const last = localStorage.getItem(LAST_DIA_WRITTEN_KEY);
+      if (last === today) return;
+    } catch {}
+  }
+  let err = null;
+  try {
+    const upsert = await supabase
+      .from(SUPABASE_DIA_TABLE)
+      .upsert(
+        { data_leitura: today, updated_at: new Date().toISOString() },
+        { onConflict: "data_leitura" }
+      );
+    if (!upsert.error) {
+      try { localStorage.setItem(LAST_DIA_WRITTEN_KEY, today); } catch {}
+      return;
+    }
+    err = upsert.error;
+  } catch (e) {
+    err = e;
+  }
+  if (err && (err.code === "42P01" || /does not exist/i.test(err?.message || ""))) {
+    try { localStorage.setItem(LAST_DIA_WRITTEN_KEY, today); } catch {}
+    return;
+  }
+  throw err instanceof Error ? err : new Error(err?.message || "Não foi possível registrar o dia no Supabase.");
+}
+const HISTORY_ORDER_LOCAL_KEY = "germinacao_history_order_v1";
+
+function storageKeyFor(code, mountingId) {
+  const c = normalizeWorkspaceCode(code);
+  const m = String(mountingId || "").trim() || "default";
+  return `${HISTORY_ORDER_LOCAL_KEY}__${c}__${m}`;
+}
+
+function readLocalHistoryOrder(code, mountingId) {
+  try {
+    const raw = localStorage.getItem(storageKeyFor(code, mountingId));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalHistoryOrder(code, mountingId, signatures) {
+  try {
+    const arr = Array.isArray(signatures) ? signatures.filter((x) => typeof x === "string") : [];
+    localStorage.setItem(storageKeyFor(code, mountingId), JSON.stringify(arr));
+  } catch {}
+}
+
+function applyHistoryOrder(countsArray, code, mountingId, optionalRemoteSignatures) {
+  if (!Array.isArray(countsArray)) return [];
+  const base = [...countsArray];
+  const mId = String(mountingId || "").trim() || "default";
+  const c = normalizeWorkspaceCode(code);
+
+  const resolveSignatures = () => {
+    const remoteRaw = Array.isArray(optionalRemoteSignatures) && optionalRemoteSignatures.length
+      ? optionalRemoteSignatures
+      : [];
+    const remoteMounting = remoteRaw
+      .find((x) => x && typeof x === "object" && (String(x.mounting_id || "").trim() || "default") === mId);
+    const remoteSigs = Array.isArray(remoteMounting?.signatures)
+      ? remoteMounting.signatures.filter((x) => typeof x === "string")
+      : [];
+    if (remoteSigs.length) return remoteSigs;
+    return readLocalHistoryOrder(c, mId);
+  };
+
+  const signatures = resolveSignatures();
+  if (!signatures.length) return base;
+  const bySig = new Map();
+  base.forEach((cEntry) => {
+    const sig = countSignature(cEntry);
+    if (!bySig.has(sig)) bySig.set(sig, cEntry);
+  });
+  const ordered = [];
+  const used = new Set();
+  signatures.forEach((sig) => {
+    const entry = bySig.get(sig);
+    if (!entry) return;
+    if (used.has(entry)) return;
+    ordered.push(entry);
+    used.add(entry);
+  });
+  const rest = base.filter((cEntry) => !used.has(cEntry));
+  return [...ordered, ...rest];
+}
 
 function normalizeWorkspaceCode(value) {
   return String(value || "")
@@ -126,11 +232,19 @@ async function loadSupabaseMeta(deviceId) {
   if (!id) return null;
   const tryFull = await supabase
     .from(SUPABASE_META_TABLE)
-    .select("day0,mountings")
+    .select("day0,mountings,history_order")
     .eq("device_id", id)
     .maybeSingle();
   if (!tryFull.error) {
-    return { day0: tryFull.data?.day0 || null, mountings: tryFull.data?.mountings ?? null };
+    const raw = tryFull.data?.history_order;
+    const historyOrder = Array.isArray(raw)
+      ? raw.filter((x) => x && typeof x === "object" && Array.isArray(x.signatures))
+      : null;
+    return {
+      day0: tryFull.data?.day0 || null,
+      mountings: tryFull.data?.mountings ?? null,
+      historyOrder,
+    };
   }
   const tryLegacy = await supabase
     .from(SUPABASE_META_TABLE)
@@ -138,7 +252,7 @@ async function loadSupabaseMeta(deviceId) {
     .eq("device_id", id)
     .maybeSingle();
   if (tryLegacy.error) throw new Error("Não foi possível carregar o ensaio no Supabase.");
-  return { day0: tryLegacy.data?.day0 || null, mountings: null };
+  return { day0: tryLegacy.data?.day0 || null, mountings: null, historyOrder: null };
 }
 
 async function saveSupabaseMeta(deviceId, payload) {
@@ -147,9 +261,15 @@ async function saveSupabaseMeta(deviceId, payload) {
   if (!id) return;
   const day0 = payload?.day0 ?? null;
   const mountings = payload?.mountings ?? null;
+  const historyOrder = Array.isArray(payload?.historyOrder)
+    ? payload.historyOrder.filter((x) => typeof x === "object" && x !== null)
+    : [];
   const full = await supabase
     .from(SUPABASE_META_TABLE)
-    .upsert({ device_id: id, day0, mountings }, { onConflict: "device_id" });
+    .upsert(
+      { device_id: id, day0, mountings, history_order: historyOrder },
+      { onConflict: "device_id" }
+    );
   if (!full.error) return;
   const legacy = await supabase
     .from(SUPABASE_META_TABLE)
@@ -429,6 +549,16 @@ function getCountSeedsPerRolo(entry) {
   const preset = getTrialPreset(trialId, kind);
   const n = Number(entry?.seedsPerRolo);
   return Number.isFinite(n) && n > 0 ? n : preset.seedsPerRolo;
+}
+
+function countSignature(entry) {
+  if (!entry) return String(Math.random());
+  const mountingId = getCountMountingId(entry);
+  const trialId = getCountTrialId(entry);
+  const kind = getCountKind(entry);
+  const dat = Number(entry.dat);
+  const date = String(entry.countDate || entry.savedAt || "").slice(0, 10);
+  return `${mountingId}|${trialId}|${kind}|${dat}|${date}`;
 }
 
 function findFirstUnfilledCell(grid, rolos) {
@@ -950,6 +1080,9 @@ export default function App() {
   const supabaseMetaSignatureRef      = useRef("");
   const supabaseMoistureTimerRef      = useRef(null);
   const supabaseMoistureSignatureRef  = useRef("");
+  const remoteHistoryOrderRef         = useRef([]);
+  const historyOrderWriteTimerRef     = useRef(null);
+  const historyOrderWriteSignatureRef = useRef("");
   const [editFocus, setEditFocus]     = useState(null);
   const [moistureRows, setMoistureRows] = useState([
     { id: "Rep 1", m1: "", m2: "", m3: "" },
@@ -996,8 +1129,10 @@ export default function App() {
 
         const remoteDay0 = remoteMeta?.day0 || null;
         const remoteMountings = remoteMeta?.mountings ?? null;
+        const remoteHistoryOrder = Array.isArray(remoteMeta?.historyOrder) ? remoteMeta.historyOrder : [];
         const nextDay0 = (remoteDay0 || (pending?.code === deviceId ? pending?.day0 : "") || "");
         const nextMountings = normalizeMountings(remoteMountings, nextDay0);
+        remoteHistoryOrderRef.current = remoteHistoryOrder;
         setDay0(nextDay0);
         setMountings(nextMountings);
         setActiveMountingId((prev) => {
@@ -1005,7 +1140,11 @@ export default function App() {
           if (keep && nextMountings.some((m) => m.id === keep)) return keep;
           return nextMountings[0]?.id || "default";
         });
-        setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
+        const baseCounts = Array.isArray(remoteCounts) ? remoteCounts : [];
+        const ordered = remoteHistoryOrder.length && nextMountings[0]
+          ? applyHistoryOrder(baseCounts, deviceId, nextMountings[0]?.id, remoteHistoryOrder)
+          : baseCounts;
+        setCounts(ordered);
         setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
           ? remoteMoisture
           : [
@@ -1035,16 +1174,68 @@ export default function App() {
     if (loading) return;
     const deviceId = workspaceCodeRef.current;
     if (!String(deviceId || "").trim()) return;
-    const signature = JSON.stringify({ deviceId, day0: day0 || null, mountings: mountings || [] });
+    const signature = JSON.stringify({
+      deviceId,
+      day0: day0 || null,
+      mountings: mountings || [],
+    });
     if (signature === supabaseMetaSignatureRef.current) return;
     supabaseMetaSignatureRef.current = signature;
     if (supabaseMetaTimerRef.current) clearTimeout(supabaseMetaTimerRef.current);
     supabaseMetaTimerRef.current = setTimeout(() => {
-      saveSupabaseMeta(deviceId, { day0: day0 || null, mountings: mountings || [] })
+      saveSupabaseMeta(deviceId, {
+        day0: day0 || null,
+        mountings: mountings || [],
+        historyOrder: remoteHistoryOrderRef.current || [],
+      })
         .then(() => setSupabaseSyncError(""))
         .catch((err) => setSupabaseSyncError(err?.message || "Não foi possível sincronizar o ensaio no Supabase."));
     }, 600);
   }, [day0, mountings, workspaceCode, loading]);
+
+  useEffect(() => {
+    if (!workspaceCode) return;
+    const mId = String(activeMountingId || "").trim() || "default";
+    const sigs = (Array.isArray(counts) ? counts : [])
+      .filter((c) => getCountMountingId(c) === mId)
+      .map((c) => countSignature(c));
+    writeLocalHistoryOrder(workspaceCode, mId, sigs);
+  }, [counts, workspaceCode, activeMountingId]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    if (!workspaceCode) return;
+    const deviceId = workspaceCodeRef.current;
+    if (!String(deviceId || "").trim()) return;
+    const mId = String(activeMountingId || "").trim() || "default";
+    const orderEntry = {
+      mounting_id: mId,
+      signatures: (Array.isArray(counts) ? counts : [])
+        .filter((c) => getCountMountingId(c) === mId)
+        .map((c) => countSignature(c)),
+    };
+    const allOrders = (() => {
+      const base = Array.isArray(remoteHistoryOrderRef.current) ? remoteHistoryOrderRef.current : [];
+      const next = base.filter((x) => x && typeof x === "object" && x.mounting_id !== mId);
+      next.push(orderEntry);
+      return next;
+    })();
+    const signature = JSON.stringify({ deviceId, historyOrder: allOrders });
+    if (signature === historyOrderWriteSignatureRef.current) return;
+    historyOrderWriteSignatureRef.current = signature;
+    if (historyOrderWriteTimerRef.current) clearTimeout(historyOrderWriteTimerRef.current);
+    historyOrderWriteTimerRef.current = setTimeout(() => {
+      remoteHistoryOrderRef.current = allOrders;
+      supabaseMetaSignatureRef.current = "";
+      saveSupabaseMeta(deviceId, {
+        day0: day0 || null,
+        mountings: mountings || [],
+        historyOrder: allOrders,
+      })
+        .then(() => setSupabaseSyncError(""))
+        .catch((err) => setSupabaseSyncError(err?.message || "Não foi possível sincronizar a ordem do histórico no Supabase."));
+    }, 420);
+  }, [counts, activeMountingId, workspaceCode, day0, mountings]);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -1119,6 +1310,7 @@ export default function App() {
         ]);
         const remoteDay0 = remoteMeta?.day0 || null;
         const remoteMountings = remoteMeta?.mountings ?? null;
+        const remoteHistoryOrder = Array.isArray(remoteMeta?.historyOrder) ? remoteMeta.historyOrder : [];
         if (remoteDay0) setDay0(remoteDay0);
         if (remoteMountings !== null) {
           const normalized = normalizeMountings(remoteMountings, remoteDay0 || day0 || "");
@@ -1129,7 +1321,14 @@ export default function App() {
             return normalized[0]?.id || "default";
           });
         }
-        setCounts(Array.isArray(remoteCounts) ? remoteCounts : []);
+        if (remoteHistoryOrder.length) remoteHistoryOrderRef.current = remoteHistoryOrder;
+        const baseCounts = Array.isArray(remoteCounts) ? remoteCounts : [];
+        const activeId = String(activeMountingId || "").trim() || "default";
+        const hasRemote = !!remoteHistoryOrder.length;
+        const ordered = hasRemote
+          ? applyHistoryOrder(baseCounts, deviceId, activeId, remoteHistoryOrder)
+          : baseCounts;
+        setCounts(ordered);
         setMoistureRows(Array.isArray(remoteMoisture) && remoteMoisture.length
           ? remoteMoisture
           : [
@@ -1245,6 +1444,48 @@ export default function App() {
     if (!loading && (!workspaceCode || !day0)) setShowTrial(true);
   }, [loading, day0, workspaceCode]);
 
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        await ensureDiaHojeNoSupabase(false);
+      } catch (err) {
+        if (cancelled) return;
+        setSupabaseSyncError(err?.message || "Não foi possível registrar o dia no Supabase.");
+      }
+    };
+    tick();
+    const id = setInterval(tick, 3 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [loading]);
+
+  const reorderMountingCounts = (mountingId, orderedEntries) => {
+    const mId = String(mountingId || "").trim() || "default";
+    const base = [...(counts || [])];
+    const signatures = orderedEntries.map((c) => countSignature(c));
+    const isValid = signatures.every((sig) => base.some((entry) => countSignature(entry) === sig));
+    if (!isValid) return;
+    const orderedSet = new Set(signatures);
+    const others = base.filter((c) => !orderedSet.has(countSignature(c)) || getCountMountingId(c) !== mId);
+    const firstMountingIdx = others.findIndex((c) => getCountMountingId(c) === mId);
+    const orderedRefs = signatures.map((sig) => base.find((entry) => countSignature(entry) === sig)).filter(Boolean);
+    let next;
+    if (firstMountingIdx < 0) {
+      next = [...others, ...orderedRefs];
+    } else {
+      next = [
+        ...others.slice(0, firstMountingIdx),
+        ...orderedRefs,
+        ...others.slice(firstMountingIdx),
+      ];
+    }
+    persist(next);
+  };
+
   // ── SALVAR CONTAGEM ──────────────────────────────────────────────
   const handleSave = async (opts = {}) => {
     const sair = typeof opts?.sair === "boolean" ? opts.sair : true;
@@ -1269,20 +1510,40 @@ export default function App() {
     };
     let next;
     const previous = editIdx !== null ? counts[editIdx] : null;
-    if (editIdx !== null) {
-      // Edição: substitui o item no índice editIdx
-      next = counts.map((c, i) => i === editIdx ? entry : c);
+    const previousSig = previous ? countSignature(previous) : null;
+    const entrySig = countSignature(entry);
+    const sameSigSlot = previousSig && previousSig === entrySig;
+
+    const placeAfter = (list, fromSig, newEntry) => {
+      if (!fromSig) return list.map((c) => countSignature(c) === fromSig ? newEntry : c);
+      const idx = list.findIndex((c) => countSignature(c) === fromSig);
+      if (idx < 0) return [...list, newEntry];
+      return [
+        ...list.slice(0, idx),
+        newEntry,
+        ...list.slice(idx + 1),
+      ];
+    };
+
+    if (editIdx !== null && previous) {
+      next = placeAfter(counts, previousSig, entry);
+      if (!sameSigSlot) {
+        const withoutOld = next.filter((c) => countSignature(c) !== previousSig || c === entry);
+        const idxOld = withoutOld.findIndex((c) => countSignature(c) === previousSig);
+        if (idxOld >= 0) withoutOld.splice(idxOld, 1);
+        next = withoutOld;
+      }
     } else {
-      const exists = counts.findIndex(c =>
-        c.dat === d &&
+      const existsSig = counts.findIndex((c) =>
+        Number(c?.dat) === d &&
         getCountKind(c) === countKind &&
         getCountTrialId(c) === countTrialId &&
         getCountMountingId(c) === getCountMountingId(entry)
       );
-      if (exists >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "Vigor" : "Germinação"}). Substituir?`)) return;
-      next = exists >= 0
-        ? counts.map((c, i) => i === exists ? entry : c)
-        : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b))); // Mantém ordem crescente
+      if (existsSig >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "GerBOX" : "Normal"}). Substituir?`)) return;
+      next = existsSig >= 0
+        ? counts.map((c, i) => i === existsSig ? entry : c)
+        : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
     }
     await persist(next);
     if (previous) {
@@ -1319,8 +1580,13 @@ export default function App() {
   };
 
   // ── INICIAR EDIÇÃO ───────────────────────────────────────────────
-  const startEdit = (idx) => {
-    const c = counts[idx];
+  const startEdit = (entryOrIdx) => {
+    const list = counts || [];
+    const idx = Number.isFinite(entryOrIdx) && entryOrIdx >= 0 && entryOrIdx < list.length
+      ? entryOrIdx
+      : list.findIndex((x) => countSignature(x) === countSignature(entryOrIdx));
+    if (idx < 0) return;
+    const c = list[idx];
     setDat(String(c.dat));
     setCountDate(String((c.countDate || c.savedAt || "").slice(0, 10)));
     const nextKind = getCountKind(c);
@@ -1342,10 +1608,15 @@ export default function App() {
   };
 
   // ── DELETAR CONTAGEM ─────────────────────────────────────────────
-  const deleteCount = async (idx) => {
+  const deleteCount = async (entryOrIdx) => {
     if (!window.confirm("Remover esta contagem?")) return;
-    const entry = counts[idx];
-    await persist(counts.filter((_, i) => i !== idx));
+    const list = counts || [];
+    const idx = Number.isFinite(entryOrIdx) && entryOrIdx >= 0 && entryOrIdx < list.length
+      ? entryOrIdx
+      : list.findIndex((x) => countSignature(x) === countSignature(entryOrIdx));
+    if (idx < 0) return;
+    const entry = list[idx];
+    await persist(list.filter((_, i) => i !== idx));
     if (entry) await deleteSupabaseCount(workspaceCodeRef.current, entry);
   };
 
@@ -1636,6 +1907,7 @@ export default function App() {
           openCalendar={() => setShowCalendar(true)}
           moistureRows={moistureRows}
           setMoistureRows={setMoistureRows}
+          reorderMountingCounts={reorderMountingCounts}
         />
       )}
       {view === "entry" && (
@@ -1971,7 +2243,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                   fontFamily: FONT_SANS,
                 }}
               >
-                Vigor
+                GerBOX
               </button>
               <button
                 type="button"
@@ -1985,7 +2257,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                   fontFamily: FONT_SANS,
                 }}
               >
-                Germinação
+                Normal
               </button>
             </div>
           </div>
@@ -2146,7 +2418,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
       <div style={{ position: "fixed", left: -10000, top: 0, background: "#ffffff" }}>
         <div ref={exportSheetRef} style={{ width: 1200, padding: 18, background: "#ffffff", color: "#0f172a", fontFamily: FONT_SANS }}>
           <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.2 }}>
-            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "Vigor" : "Germinação"}
+            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "GerBOX" : "Normal"}
           </div>
           <div style={{ marginTop: 6, fontSize: 12, color: "#334155", display: "flex", gap: 12, flexWrap: "wrap" }}>
             <span>Dia 0: <b style={{ color: "#0f172a" }}>{day0 ? formatPtBrDate(day0) : "—"}</b></span>
@@ -2244,13 +2516,16 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
 // ══════════════════════════════════════════════════════════════════
 // COMPONENTE: DashboardView — Painel analítico principal
 // ══════════════════════════════════════════════════════════════════
-function DashboardView({ counts, mountings, activeMountingId, setActiveMountingId, openMountingModal, startEdit, deleteCount, openCalendar, moistureRows, setMoistureRows }) {
+function DashboardView({ counts, mountings, activeMountingId, setActiveMountingId, openMountingModal, startEdit, deleteCount, openCalendar, moistureRows, setMoistureRows, reorderMountingCounts }) {
 
   // Tratamento selecionado para o gráfico de rolos
   const [selT, setSelT] = useState("T1");
   const trendChartRef = useRef(null);
   const distChartRef = useRef(null);
   const roloChartRef = useRef(null);
+  const [dragOverIdx, setDragOverIdx] = useState(null);
+  const [draggingIdx, setDraggingIdx] = useState(null);
+  const [historyOrder, setHistoryOrder] = useState([]);
   const barValueLabel = ({ x, y, width, height, value, fill }) => {
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) return null;
@@ -2277,6 +2552,40 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
   const activeMounting = (mountings || []).find((m) => m.id === activeId) || (mountings || [])[0] || null;
   const filteredCounts = (counts || []).filter((c) => getCountMountingId(c) === activeId);
   const sortedAll = [...filteredCounts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+
+  useEffect(() => {
+    if (!historyOrder.length) {
+      setHistoryOrder([...sortedAll]);
+      return;
+    }
+    const currentSigs = historyOrder.map((c) => countSignature(c));
+    const currentSigSet = new Set(currentSigs);
+    const sortedSigs = sortedAll.map((c) => countSignature(c));
+    const sortedSigSet = new Set(sortedSigs);
+    const sameSize = currentSigs.length === sortedSigs.length;
+    const setEqual = sameSize && currentSigs.every((s) => sortedSigSet.has(s));
+    const orderEquals = sameSize && currentSigs.every((s, i) => s === sortedSigs[i]);
+    if (setEqual) return;
+
+    const orderedSigSet = new Set(currentSigs);
+    const next = [];
+    const used = new Set();
+    historyOrder.forEach((c) => {
+      const sig = countSignature(c);
+      if (!sortedSigSet.has(sig)) return;
+      if (used.has(sig)) return;
+      next.push(c);
+      used.add(sig);
+    });
+    sortedAll.forEach((c) => {
+      const sig = countSignature(c);
+      if (used.has(sig)) return;
+      next.push(c);
+      used.add(sig);
+    });
+    const hasChanges = !next.length || next.some((c, i) => countSignature(c) !== countSignature(historyOrder[i])) || next.length !== historyOrder.length;
+    if (hasChanges) setHistoryOrder(next);
+  }, [sortedAll, historyOrder]);
   const groupedByDat = new Map();
   sortedAll.forEach(c => {
     const existing = groupedByDat.get(c.dat);
@@ -2442,6 +2751,50 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
     }
   };
 
+  const handleDragStart = (idx, e) => {
+    setDraggingIdx(idx);
+    try {
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(idx));
+      }
+    } catch {}
+  };
+
+  const handleDragOver = (idx, e) => {
+    if (draggingIdx === null) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "move"; } catch {}
+    if (dragOverIdx !== idx) setDragOverIdx(idx);
+  };
+
+  const handleDragLeave = (idx) => {
+    if (dragOverIdx === idx) setDragOverIdx(null);
+  };
+
+  const handleDrop = (idx, e) => {
+    e.preventDefault();
+    const from = draggingIdx === null ? Number(e.dataTransfer?.getData("text/plain") || "-1") : draggingIdx;
+    const to = idx;
+    setDragOverIdx(null);
+    setDraggingIdx(null);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < 0) return;
+    if (from >= historyOrder.length || to >= historyOrder.length) return;
+    if (from === to) return;
+    const next = [...historyOrder];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setHistoryOrder(next);
+    if (typeof reorderMountingCounts === "function") {
+      reorderMountingCounts(activeId, next);
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDragOverIdx(null);
+    setDraggingIdx(null);
+  };
+
   return (
     <div className="dashboard-layout">
       <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", marginBottom: 16 }}>
@@ -2525,7 +2878,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
         })()}
 
         <KPIBlock label="ÚLTIMA CONTAGEM" val={`DAT ${latest.dat}`}
-          sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "Vigor" : "Germinação"}`}
+          sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "GerBOX" : "Normal"}`}
           color="#6f93b5" infoKey="ultimaContagem" />
 
         <KPIBlock label="TOTAL DE CONTAGENS" val={filteredCounts.length}
@@ -2745,12 +3098,16 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
       {/* ── TABELA HISTÓRICA ─────────────────────────────────────── */}
       <div style={card()}>
         <CardTitle emoji="📋" title="HISTÓRICO DE CONTAGENS" infoKey="historico" />
-        {sortedAll.length === 0
+        <p style={{ color: UI.textSoft, fontSize: 11, marginBottom: 12 }}>
+          Segure na coluna <b>Ordem</b> (⋮⋮) e arraste para reorganizar as linhas com o mouse.
+        </p>
+        {historyOrder.length === 0
           ? <p style={{ color: UI.textSoft, fontSize: 12 }}>Sem contagens.</p>
           : <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${UI.border}` }}>
+                    <th style={{ textAlign: "left", padding: "8px 6px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500, width: 40 }}>Ordem</th>
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>DAT</th>
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Data</th>
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Tipo</th>
@@ -2768,50 +3125,93 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedAll.map((c, i) => (
-                    <tr key={`${c.dat}-${getCountKind(c)}-${i}`} style={{ borderBottom: "1px solid #e5e7eb" }}>
-                      <td style={{ padding: "10px", fontFamily: FONT_SANS, fontWeight: 700, fontSize: 16, color: "#6f93b5", letterSpacing: 0.2 }}>{c.dat}</td>
-                      <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
-                        {formatPtBrDate(c.countDate || c.savedAt)}
-                      </td>
-                      <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
-                        {getCountKind(c) === "vigor" ? "Vigor" : "Germinação"}
-                      </td>
-                      {TREATMENTS.flatMap(t =>
-                        ["N", "A", "M"].map(tipo => {
-                          const s = sumTreatment(c.grid, t.id, getCountRolos(c));
-                          const val = Number(s[tipo] || 0);
-                          const pctStr = s.total > 0 ? ((val / s.total) * 100).toFixed(1) : "—";
-                          const pctNum = pctStr === "—" ? 0 : Number(pctStr);
-                          const color = TIPO_COLORS[tipo];
-                          return (
-                            <td key={`${t.id}-${tipo}`} style={{ padding: "10px" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                <div style={{ width: 40, height: 4, background: "#e5e7eb", borderRadius: 2 }}>
-                                  <div style={{ width: `${pctNum}%`, height: "100%", background: color, borderRadius: 2 }} />
+                  {historyOrder.map((c, i) => {
+                    const isDragging = draggingIdx === i;
+                    const isDropTarget = dragOverIdx === i && draggingIdx !== null && draggingIdx !== i;
+                    const rowStyle = {
+                      borderBottom: "1px solid #e5e7eb",
+                      opacity: isDragging ? 0.45 : 1,
+                      background: isDropTarget ? "#eaf1fa" : "transparent",
+                      cursor: draggingIdx === i ? "grabbing" : "default",
+                      transition: "background 0.12s ease, opacity 0.12s ease",
+                    };
+                    return (
+                      <tr
+                        key={`${countSignature(c)}-${i}`}
+                        style={rowStyle}
+                        draggable={false}
+                      >
+                        <td style={{ padding: "6px 4px", verticalAlign: "middle" }}>
+                          <div
+                            draggable
+                            onDragStart={(e) => handleDragStart(i, e)}
+                            onDragOver={(e) => handleDragOver(i, e)}
+                            onDragLeave={() => handleDragLeave(i)}
+                            onDrop={(e) => handleDrop(i, e)}
+                            onDragEnd={handleDragEnd}
+                            title="Arraste para ordenar"
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              width: 32,
+                              height: 32,
+                              borderRadius: 6,
+                              cursor: draggingIdx === i ? "grabbing" : "grab",
+                              background: draggingIdx === i ? "#dbeafe" : "transparent",
+                              border: `1px solid ${draggingIdx === i ? "#93c5fd" : UI.border}`,
+                              color: UI.textSoft,
+                              fontSize: 14,
+                              userSelect: "none",
+                              touchAction: "none",
+                            }}
+                          >
+                            ⋮⋮
+                          </div>
+                        </td>
+                        <td style={{ padding: "10px", fontFamily: FONT_SANS, fontWeight: 700, fontSize: 16, color: "#6f93b5", letterSpacing: 0.2 }}>{c.dat}</td>
+                        <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
+                          {formatPtBrDate(c.countDate || c.savedAt)}
+                        </td>
+                        <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
+                          {getCountKind(c) === "vigor" ? "GerBOX" : "Normal"}
+                        </td>
+                        {TREATMENTS.flatMap(t =>
+                          ["N", "A", "M"].map(tipo => {
+                            const s = sumTreatment(c.grid, t.id, getCountRolos(c));
+                            const val = Number(s[tipo] || 0);
+                            const pctStr = s.total > 0 ? ((val / s.total) * 100).toFixed(1) : "—";
+                            const pctNum = pctStr === "—" ? 0 : Number(pctStr);
+                            const color = TIPO_COLORS[tipo];
+                            return (
+                              <td key={`${t.id}-${tipo}`} style={{ padding: "10px" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <div style={{ width: 40, height: 4, background: "#e5e7eb", borderRadius: 2 }}>
+                                    <div style={{ width: `${pctNum}%`, height: "100%", background: color, borderRadius: 2 }} />
+                                  </div>
+                                  <span style={{ fontFamily: FONT_SANS, fontSize: 11, color }}>
+                                    {pctStr}%
+                                  </span>
                                 </div>
-                                <span style={{ fontFamily: FONT_SANS, fontSize: 11, color }}>
-                                  {pctStr}%
-                                </span>
-                              </div>
-                            </td>
-                          );
-                        })
-                      )}
-                      <td style={{ padding: "10px" }}>
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <button className="btn" onClick={() => startEdit(counts.indexOf(c))}
-                            style={{ background: "#6f93b522", color: "#6f93b5", border: "1px solid #6f93b533", borderRadius: 5, padding: "3px 10px", fontSize: 10, fontFamily: FONT_SANS, cursor: "pointer" }}>
-                            ✏️ Editar
-                          </button>
-                          <button className="btn" onClick={() => deleteCount(counts.indexOf(c))}
-                            style={{ background: "#c47b6a11", color: "#c47b6a", border: "1px solid #c47b6a33", borderRadius: 5, padding: "3px 10px", fontSize: 10, fontFamily: FONT_SANS, cursor: "pointer" }}>
-                            🗑
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                              </td>
+                            );
+                          })
+                        )}
+                        <td style={{ padding: "10px" }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button className="btn" onClick={() => startEdit(c)}
+                              style={{ background: "#6f93b522", color: "#6f93b5", border: "1px solid #6f93b533", borderRadius: 5, padding: "3px 10px", fontSize: 10, fontFamily: FONT_SANS, cursor: "pointer" }}>
+                              ✏️ Editar
+                            </button>
+                            <button className="btn" onClick={() => deleteCount(c)}
+                              style={{ background: "#c47b6a11", color: "#c47b6a", border: "1px solid #c47b6a33", borderRadius: 5, padding: "3px 10px", fontSize: 10, fontFamily: FONT_SANS, cursor: "pointer" }}>
+                              🗑
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
