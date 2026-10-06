@@ -2617,6 +2617,8 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
   const trendChartRef = useRef(null);
   const distChartRef = useRef(null);
   const roloChartRef = useRef(null);
+  const batchExportRef = useRef(null);
+  const [batchExportCount, setBatchExportCount] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const [draggingIdx, setDraggingIdx] = useState(null);
   const [historyOrder, setHistoryOrder] = useState([]);
@@ -2842,6 +2844,54 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
       URL.revokeObjectURL(url);
     } catch (err) {
       alert(err?.message || "Não foi possível exportar o PNG.");
+    }
+  };
+
+  const exportAllCountsPng = async () => {
+    const ordered = Array.isArray(historyOrder) ? historyOrder : [];
+    if (!ordered.length) {
+      alert("Nenhuma contagem para exportar.");
+      return;
+    }
+    const mountingLabel = activeMounting?.label || "montagem";
+    try {
+      for (let i = 0; i < ordered.length; i++) {
+        const c = ordered[i];
+        setBatchExportCount(c);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        if (!batchExportRef.current) continue;
+        const canvas = await html2canvas(batchExportRef.current, {
+          backgroundColor: "#ffffff",
+          scale: 2,
+          useCORS: true,
+          logging: false,
+        });
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+        if (!blob) continue;
+        const datLabel = c.dat ?? "?";
+        const kindLabel = getCountKind(c) === "vigor" ? "vigor" : "germinacao";
+        const daysLabel = `${getCountAnalysisDays(c) || 5}dias`;
+        const dateLabel = String(c.countDate || c.savedAt || "").slice(0, 10);
+        const orderLabel = String(i + 1).padStart(2, "0");
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = sanitizeFileName(
+          `${orderLabel}_contagem_${mountingLabel}_dat_${datLabel}_${kindLabel}_${daysLabel}_${dateLabel}.png`
+        );
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        if (i < ordered.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 650));
+        }
+      }
+    } catch (err) {
+      alert(err?.message || "Não foi possível exportar todas as contagens.");
+    } finally {
+      setBatchExportCount(null);
     }
   };
 
@@ -3191,9 +3241,27 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
 
       {/* ── TABELA HISTÓRICA ─────────────────────────────────────── */}
       <div style={card()}>
-        <CardTitle emoji="📋" title="HISTÓRICO DE CONTAGENS" infoKey="historico" />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+          <CardTitle emoji="📋" title="HISTÓRICO DE CONTAGENS" infoKey="historico" extra={{ marginBottom: 0 }} />
+          <button
+            className="btn"
+            onClick={exportAllCountsPng}
+            style={{
+              background: "transparent",
+              border: `1px solid ${UI.border}`,
+              borderRadius: 8,
+              padding: "6px 12px",
+              fontSize: 12,
+              fontFamily: FONT_SANS,
+              color: UI.textSoft,
+            }}
+          >
+            📷 Exportar TODAS (PNG)
+          </button>
+        </div>
         <p style={{ color: UI.textSoft, fontSize: 11, marginBottom: 12 }}>
           Segure na coluna <b>Ordem</b> (⋮⋮) e arraste para reorganizar as linhas com o mouse.
+          Os arquivos PNG serão exportados na mesma ordem exibida acima.
         </p>
         {historyOrder.length === 0
           ? <p style={{ color: UI.textSoft, fontSize: 12 }}>Sem contagens.</p>
@@ -3315,6 +3383,136 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
             </div>
         }
       </div>
+
+      {batchExportCount && (
+        <div style={{ position: "fixed", left: -10000, top: 0, background: "#ffffff" }}>
+          <div
+            ref={batchExportRef}
+            style={{ width: 1200, padding: 18, background: "#ffffff", color: "#0f172a", fontFamily: FONT_SANS }}
+          >
+            <div
+              style={{
+                fontSize: 20,
+                fontWeight: 800,
+                letterSpacing: 0.2,
+                textAlign: "center",
+                paddingBottom: 14,
+                borderBottom: "1px solid #e2e8f0",
+              }}
+            >
+              DAT {batchExportCount.dat ?? "—"} ·{" "}
+              {getCountKind(batchExportCount) === "vigor" ? "GerBOX" : "Normal"} · Análise de{" "}
+              {getCountAnalysisDays(batchExportCount) || 5} dias
+            </div>
+
+            {(() => {
+              const rolos = getCountRolos(batchExportCount);
+              const seedsPerRolo = getCountSeedsPerRolo(batchExportCount);
+              const grid = batchExportCount.grid || {};
+              return TREATMENTS.map((t) => {
+                const s = sumTreatment(grid, t.id, rolos);
+                const expected = rolos.length * seedsPerRolo;
+                return (
+                  <div
+                    key={t.id}
+                    style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, marginTop: 12 }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "baseline",
+                        gap: 12,
+                        flexWrap: "wrap",
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div style={{ fontSize: 14, fontWeight: 900, color: t.color }}>
+                        {t.id} · {t.name}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#334155" }}>
+                        <span style={{ color: "#6fa58b", fontWeight: 800 }}>N:</span> {s.N}{" "}
+                        <span style={{ color: "#b69b6a", fontWeight: 800 }}>A:</span> {s.A}{" "}
+                        <span style={{ color: "#c47b6a", fontWeight: 800 }}>M:</span> {s.M}{" "}
+                        <span style={{ fontWeight: 800 }}>Total:</span> {s.total}/{expected}
+                      </div>
+                    </div>
+
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "8px 8px",
+                              color: "#475569",
+                              fontFamily: FONT_SANS,
+                              fontSize: 11,
+                              fontWeight: 800,
+                              width: 92,
+                            }}
+                          >
+                            Tipo
+                          </th>
+                          {rolos.map((r) => (
+                            <th
+                              key={r}
+                              style={{
+                                textAlign: "center",
+                                padding: "8px 6px",
+                                color: "#475569",
+                                fontFamily: FONT_SANS,
+                                fontSize: 11,
+                                fontWeight: 800,
+                              }}
+                            >
+                              {r}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {TIPOS.map((tipo) => (
+                          <tr key={tipo} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                            <td
+                              style={{
+                                padding: "8px 8px",
+                                fontFamily: FONT_SANS,
+                                fontWeight: 800,
+                                color: TIPO_COLORS[tipo],
+                              }}
+                            >
+                              {TIPO_LABELS[tipo]}
+                            </td>
+                            {rolos.map((r) => {
+                              const v = grid?.[t.id]?.[r]?.[tipo];
+                              const txt =
+                                v === "" || v === null || typeof v === "undefined" ? "—" : String(v);
+                              return (
+                                <td
+                                  key={`${tipo}-${r}`}
+                                  style={{
+                                    padding: "8px 6px",
+                                    textAlign: "center",
+                                    fontFamily: FONT_SANS,
+                                    color: "#0f172a",
+                                  }}
+                                >
+                                  {txt}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
