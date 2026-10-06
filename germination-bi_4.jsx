@@ -283,13 +283,14 @@ async function loadSupabaseCounts(deviceId) {
   if (!id) return null;
   const tryFull = await supabase
     .from(SUPABASE_COUNTS_TABLE)
-    .select("trial_code, kind, mounting_id, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
+    .select("trial_code, kind, mounting_id, dat, analysis_days, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
     .eq("device_id", id)
     .order("dat", { ascending: true });
   if (!tryFull.error) {
     const data = tryFull.data || [];
     return data.map((row) => ({
       dat: row.dat,
+      analysisDays: Number(row.analysis_days) || 5,
       grid: row.grid,
       countDate: row.count_date,
       kind: row.kind,
@@ -298,17 +299,18 @@ async function loadSupabaseCounts(deviceId) {
       rolosCount: row.rolos_count,
       seedsPerRolo: row.seeds_per_rolo,
       savedAt: row.saved_at,
-    })).sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+    })).sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)) || (getCountAnalysisDays(a) - getCountAnalysisDays(b)));
   }
   const tryLegacy = await supabase
     .from(SUPABASE_COUNTS_TABLE)
-    .select("trial_code, kind, dat, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
+    .select("trial_code, kind, dat, analysis_days, count_date, rolos_count, seeds_per_rolo, grid, saved_at")
     .eq("device_id", id)
     .order("dat", { ascending: true });
   if (tryLegacy.error) throw new Error("Não foi possível carregar contagens do Supabase.");
   const data = tryLegacy.data || [];
   return data.map((row) => ({
     dat: row.dat,
+    analysisDays: Number(row.analysis_days) || 5,
     grid: row.grid,
     countDate: row.count_date,
     kind: row.kind,
@@ -317,7 +319,7 @@ async function loadSupabaseCounts(deviceId) {
     rolosCount: row.rolos_count,
     seedsPerRolo: row.seeds_per_rolo,
     savedAt: row.saved_at,
-  })).sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+  })).sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)) || (getCountAnalysisDays(a) - getCountAnalysisDays(b)));
 }
 
 async function upsertSupabaseCount(deviceId, entry) {
@@ -327,12 +329,14 @@ async function upsertSupabaseCount(deviceId, entry) {
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   const mountingId = getCountMountingId(entry);
+  const analysisDays = getCountAnalysisDays(entry);
   const payloadFull = {
     device_id: id,
     trial_code: trialId,
     kind,
     mounting_id: mountingId,
     dat: Number(entry.dat),
+    analysis_days: analysisDays,
     count_date: entry.countDate || null,
     rolos_count: Number(entry.rolosCount || getCountRolos(entry).length),
     seeds_per_rolo: Number(entry.seedsPerRolo || getCountSeedsPerRolo(entry)),
@@ -341,7 +345,7 @@ async function upsertSupabaseCount(deviceId, entry) {
   };
   const full = await supabase
     .from(SUPABASE_COUNTS_TABLE)
-    .upsert(payloadFull, { onConflict: "device_id,trial_code,kind,mounting_id,dat" });
+    .upsert(payloadFull, { onConflict: "device_id,trial_code,kind,mounting_id,dat,analysis_days" });
   if (!full.error) return;
   const legacy = await supabase
     .from(SUPABASE_COUNTS_TABLE)
@@ -351,13 +355,14 @@ async function upsertSupabaseCount(deviceId, entry) {
         trial_code: trialId,
         kind,
         dat: Number(entry.dat),
+        analysis_days: analysisDays,
         count_date: entry.countDate || null,
         rolos_count: Number(entry.rolosCount || getCountRolos(entry).length),
         seeds_per_rolo: Number(entry.seedsPerRolo || getCountSeedsPerRolo(entry)),
         grid: entry.grid,
         saved_at: entry.savedAt || new Date().toISOString(),
       },
-      { onConflict: "device_id,trial_code,kind,dat" }
+      { onConflict: "device_id,trial_code,kind,dat,analysis_days" }
     );
   if (legacy.error) throw new Error("Não foi possível salvar a contagem no Supabase.");
 }
@@ -369,6 +374,7 @@ async function deleteSupabaseCount(deviceId, entry) {
   const kind = getCountKind(entry);
   const trialId = getCountTrialId(entry);
   const mountingId = getCountMountingId(entry);
+  const analysisDays = getCountAnalysisDays(entry);
   const full = await supabase
     .from(SUPABASE_COUNTS_TABLE)
     .delete()
@@ -376,7 +382,8 @@ async function deleteSupabaseCount(deviceId, entry) {
     .eq("trial_code", trialId)
     .eq("kind", kind)
     .eq("mounting_id", mountingId)
-    .eq("dat", Number(entry.dat));
+    .eq("dat", Number(entry.dat))
+    .eq("analysis_days", analysisDays);
   if (!full.error) return;
   await supabase
     .from(SUPABASE_COUNTS_TABLE)
@@ -384,7 +391,8 @@ async function deleteSupabaseCount(deviceId, entry) {
     .eq("device_id", id)
     .eq("trial_code", trialId)
     .eq("kind", kind)
-    .eq("dat", Number(entry.dat));
+    .eq("dat", Number(entry.dat))
+    .eq("analysis_days", analysisDays);
 }
 
 async function loadSupabaseMoisture(deviceId) {
@@ -537,6 +545,11 @@ function getCountMountingId(entry) {
   return typeof m === "string" && m ? m : "default";
 }
 
+function getCountAnalysisDays(entry) {
+  const d = Number(entry?.analysisDays);
+  return Number.isFinite(d) && d > 0 ? Math.floor(d) : 5;
+}
+
 function getCountRolos(entry) {
   const trialId = getCountTrialId(entry);
   const kind = getCountKind(entry);
@@ -557,8 +570,9 @@ function countSignature(entry) {
   const trialId = getCountTrialId(entry);
   const kind = getCountKind(entry);
   const dat = Number(entry.dat);
+  const analysisDays = getCountAnalysisDays(entry);
   const date = String(entry.countDate || entry.savedAt || "").slice(0, 10);
-  return `${mountingId}|${trialId}|${kind}|${dat}|${date}`;
+  return `${mountingId}|${trialId}|${kind}|${dat}|${analysisDays}|${date}`;
 }
 
 function findFirstUnfilledCell(grid, rolos) {
@@ -1061,6 +1075,7 @@ export default function App() {
   const [countDate, setCountDate]     = useState("");          // Data da contagem (yyyy-mm-dd)
   const [countKind, setCountKind]     = useState(initialKind);
   const [countTrialId, setCountTrialId] = useState(initialTrialId);
+  const [countAnalysisDays, setCountAnalysisDays] = useState(5);
   const [countRolosCount, setCountRolosCount] = useState(initialPreset.rolosCount);
   const [countSeedsPerRolo, setCountSeedsPerRolo] = useState(initialPreset.seedsPerRolo);
   const [mountings, setMountings]     = useState(() => normalizeMountings([], DEFAULT_DAY0));
@@ -1378,6 +1393,7 @@ export default function App() {
         kind: getCountKind(c),
         mounting_id: getCountMountingId(c),
         dat: Number(c.dat),
+        analysis_days: getCountAnalysisDays(c),
         count_date: c.countDate || null,
         rolos_count: Number(c.rolosCount || getCountRolos(c).length),
         seeds_per_rolo: Number(c.seedsPerRolo || getCountSeedsPerRolo(c)),
@@ -1388,24 +1404,24 @@ export default function App() {
       if (rows.length) {
         const full = await supabase
           .from(SUPABASE_COUNTS_TABLE)
-          .upsert(rows, { onConflict: "device_id,trial_code,kind,mounting_id,dat" });
+          .upsert(rows, { onConflict: "device_id,trial_code,kind,mounting_id,dat,analysis_days" });
         if (full.error) {
           const legacyRows = rows.map(({ mounting_id: _m, ...rest }) => rest);
           await supabase
             .from(SUPABASE_COUNTS_TABLE)
-            .upsert(legacyRows, { onConflict: "device_id,trial_code,kind,dat" });
+            .upsert(legacyRows, { onConflict: "device_id,trial_code,kind,dat,analysis_days" });
         }
       }
 
       const fullExisting = await supabase
         .from(SUPABASE_COUNTS_TABLE)
-        .select("trial_code, kind, mounting_id, dat")
+        .select("trial_code, kind, mounting_id, dat, analysis_days")
         .eq("device_id", deviceId);
 
       if (!fullExisting.error && Array.isArray(fullExisting.data)) {
-        const keep = new Set(rows.map((r) => `${r.trial_code}|${r.kind}|${r.mounting_id}|${r.dat}`));
+        const keep = new Set(rows.map((r) => `${r.trial_code}|${r.kind}|${r.mounting_id}|${r.dat}|${r.analysis_days}`));
         for (const ex of fullExisting.data) {
-          const key = `${ex.trial_code}|${ex.kind}|${ex.mounting_id || "default"}|${ex.dat}`;
+          const key = `${ex.trial_code}|${ex.kind}|${ex.mounting_id || "default"}|${ex.dat}|${Number(ex.analysis_days) || 5}`;
           if (keep.has(key)) continue;
           await supabase
             .from(SUPABASE_COUNTS_TABLE)
@@ -1414,18 +1430,19 @@ export default function App() {
             .eq("trial_code", ex.trial_code)
             .eq("kind", ex.kind)
             .eq("mounting_id", ex.mounting_id || "default")
-            .eq("dat", ex.dat);
+            .eq("dat", ex.dat)
+            .eq("analysis_days", Number(ex.analysis_days) || 5);
         }
       } else {
         const legacyExisting = await supabase
           .from(SUPABASE_COUNTS_TABLE)
-          .select("trial_code, kind, dat")
+          .select("trial_code, kind, dat, analysis_days")
           .eq("device_id", deviceId);
         if (!legacyExisting.error && Array.isArray(legacyExisting.data)) {
           const legacyRows = rows.map(({ mounting_id: _m, ...rest }) => rest);
-          const keep = new Set(legacyRows.map((r) => `${r.trial_code}|${r.kind}|${r.dat}`));
+          const keep = new Set(legacyRows.map((r) => `${r.trial_code}|${r.kind}|${r.dat}|${r.analysis_days}`));
           for (const ex of legacyExisting.data) {
-            const key = `${ex.trial_code}|${ex.kind}|${ex.dat}`;
+            const key = `${ex.trial_code}|${ex.kind}|${ex.dat}|${Number(ex.analysis_days) || 5}`;
             if (keep.has(key)) continue;
             await supabase
               .from(SUPABASE_COUNTS_TABLE)
@@ -1433,7 +1450,8 @@ export default function App() {
               .eq("device_id", deviceId)
               .eq("trial_code", ex.trial_code)
               .eq("kind", ex.kind)
-              .eq("dat", ex.dat);
+              .eq("dat", ex.dat)
+              .eq("analysis_days", Number(ex.analysis_days) || 5);
           }
         }
       }
@@ -1497,12 +1515,15 @@ export default function App() {
     const preset = getTrialPreset(countTrialId, countKind);
     const nRolos = Number(countRolosCount);
     const nSeeds = Number(countSeedsPerRolo);
+    const analysisDaysNum = Number(countAnalysisDays);
+    const safeAnalysisDays = Number.isFinite(analysisDaysNum) && analysisDaysNum > 0 ? Math.floor(analysisDaysNum) : 5;
     const entry = {
       dat: d,
       grid,
       countDate,
       kind: countKind,
       trialId: countTrialId,
+      analysisDays: safeAnalysisDays,
       mountingId: activeMountingId || "default",
       rolosCount: Number.isFinite(nRolos) && nRolos > 0 ? Math.floor(nRolos) : preset.rolosCount,
       seedsPerRolo: Number.isFinite(nSeeds) && nSeeds > 0 ? Math.floor(nSeeds) : preset.seedsPerRolo,
@@ -1538,12 +1559,13 @@ export default function App() {
         Number(c?.dat) === d &&
         getCountKind(c) === countKind &&
         getCountTrialId(c) === countTrialId &&
-        getCountMountingId(c) === getCountMountingId(entry)
+        getCountMountingId(c) === getCountMountingId(entry) &&
+        getCountAnalysisDays(c) === safeAnalysisDays
       );
-      if (existsSig >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "GerBOX" : "Normal"}). Substituir?`)) return;
+      if (existsSig >= 0 && !window.confirm(`Já existe contagem no DAT ${d} (${countKind === "vigor" ? "GerBOX" : "Normal"}) com análise de ${safeAnalysisDays} dias. Substituir?`)) return;
       next = existsSig >= 0
         ? counts.map((c, i) => i === existsSig ? entry : c)
-        : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+        : [...counts, entry].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)) || (getCountAnalysisDays(a) - getCountAnalysisDays(b)));
     }
     await persist(next);
     if (previous) {
@@ -1551,7 +1573,8 @@ export default function App() {
         Number(previous.dat) !== Number(entry.dat) ||
         getCountKind(previous) !== getCountKind(entry) ||
         getCountTrialId(previous) !== getCountTrialId(entry) ||
-        getCountMountingId(previous) !== getCountMountingId(entry);
+        getCountMountingId(previous) !== getCountMountingId(entry) ||
+        getCountAnalysisDays(previous) !== getCountAnalysisDays(entry);
       if (changedKey) await deleteSupabaseCount(workspaceCodeRef.current, previous);
     }
     try {
@@ -1566,7 +1589,8 @@ export default function App() {
       Number(c?.dat) === Number(entry.dat) &&
       getCountKind(c) === getCountKind(entry) &&
       getCountTrialId(c) === getCountTrialId(entry) &&
-      getCountMountingId(c) === getCountMountingId(entry);
+      getCountMountingId(c) === getCountMountingId(entry) &&
+      getCountAnalysisDays(c) === getCountAnalysisDays(entry);
     const savedIndex = next.findIndex(key);
     setTimeout(() => {
       setSaved(false);
@@ -1592,6 +1616,7 @@ export default function App() {
     const nextKind = getCountKind(c);
     const nextTrialId = getCountTrialId(c);
     setActiveMountingId(getCountMountingId(c));
+    setCountAnalysisDays(getCountAnalysisDays(c));
     const rolos = getCountRolos(c);
     const seeds = getCountSeedsPerRolo(c);
     setCountKind(nextKind);
@@ -1638,6 +1663,7 @@ export default function App() {
     const dd = String(today.getDate()).padStart(2, "0");
     setCountDate(`${yyyy}-${mm}-${dd}`);
     setCountKind("vigor");
+    setCountAnalysisDays(5);
     const trialId = countTrialId || "principal";
     const preset = getTrialPreset(trialId, "vigor");
     const rolosCount = preset.rolosCount;
@@ -1652,6 +1678,7 @@ export default function App() {
   const startNewAtDate = (isoDate) => {
     setCountDate(isoDate);
     setCountKind("vigor");
+    setCountAnalysisDays(5);
     const trialId = countTrialId || "principal";
     const preset = getTrialPreset(trialId, "vigor");
     const rolosCount = preset.rolosCount;
@@ -1821,7 +1848,7 @@ export default function App() {
               ENSAIO DE GERMINAÇÃO
             </h1>
             <p style={{ fontSize: 10, color: UI.textSoft, fontFamily: FONT_SANS, letterSpacing: 0.3 }}>
-              Código: {workspaceCode || "—"} · Dia 0: {day0 ? formatPtBrDate(day0) : "—"} · Montagem: {activeMounting?.label || "—"} · {headerCounts.length} CONTAGEM{headerCounts.length !== 1 ? "S" : ""} · DATs: {headerCounts.map(c => c.dat).join(", ") || "—"}
+              Código: {workspaceCode || "—"} · Dia 0: {day0 ? formatPtBrDate(day0) : "—"} · Montagem: {activeMounting?.label || "—"} · {headerCounts.length} CONTAGEM{headerCounts.length !== 1 ? "S" : ""} · DATs: {headerCounts.map(c => `${c.dat}(${getCountKind(c)==="vigor"?"G":"N"}${getCountAnalysisDays(c)}d)`).join(", ") || "—"}
             </p>
           </div>
         </div>
@@ -1914,6 +1941,7 @@ export default function App() {
         <EntryView
           dat={dat} setDat={setDat} day0={day0} openTrial={() => setShowTrial(true)} countDate={countDate} setCountDate={setCountDate} grid={grid}
           countKind={countKind} setCountKind={setCountKind}
+          countAnalysisDays={countAnalysisDays} setCountAnalysisDays={setCountAnalysisDays}
           countTrialId={countTrialId} setCountTrialId={setCountTrialId}
           countRolosCount={countRolosCount} setCountRolosCount={setCountRolosCount}
           countSeedsPerRolo={countSeedsPerRolo} setCountSeedsPerRolo={setCountSeedsPerRolo}
@@ -1988,13 +2016,14 @@ export default function App() {
 // COMPONENTE: EntryView — Formulário de entrada de dados
 // Exibe grade N/A/M × R1-R12 por tratamento (selecionado via abas)
 // ══════════════════════════════════════════════════════════════════
-function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, mountings, activeMountingId, onChangeMounting, openMountingModal, grid, activeTreat, setActiveTreat, setCell, saved, editIdx, editFocus, handleSave, onCancel }) {
+function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, countKind, setCountKind, countAnalysisDays, setCountAnalysisDays, countTrialId, setCountTrialId, countRolosCount, setCountRolosCount, countSeedsPerRolo, setCountSeedsPerRolo, mountings, activeMountingId, onChangeMounting, openMountingModal, grid, activeTreat, setActiveTreat, setCell, saved, editIdx, editFocus, handleSave, onCancel }) {
   const inputRefs = useRef({});
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
   const lastAutoFocusKeyRef = useRef("");
-  const navModeRef = useRef("normal");
+  const navModeRef = useRef("reverse");
   const exportSheetRef = useRef(null);
+  const [activeRolo, setActiveRolo] = useState(null);
   const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
   const preset = getTrialPreset(countTrialId, countKind);
   const seedsPerRolo = Number(countSeedsPerRolo || 0) || preset.seedsPerRolo;
@@ -2010,7 +2039,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
 
   const exportAllTreatmentsSinglePng = async () => {
     try {
-      const base = `contagem_${activeMounting?.label || "montagem"}_dat_${datLabel || "?"}_${countKind === "vigor" ? "vigor" : "germinacao"}_${countDate || ""}`;
+      const base = `contagem_${activeMounting?.label || "montagem"}_dat_${datLabel || "?"}_${countKind === "vigor" ? "vigor" : "germinacao"}_${countAnalysisDays || 5}dias_${countDate || ""}`;
       await exportHtmlAsPng(exportSheetRef.current, `${base}.png`, { background: "#ffffff", pixelRatio: 2 });
     } catch (err) {
       alert(err?.message || "Não foi possível exportar o PNG.");
@@ -2021,14 +2050,6 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
   const setInputRef = (rolo, tipo) => (el) => {
     if (!el) return;
     inputRefs.current[keyFor(rolo, tipo)] = el;
-  };
-
-  const focusCell = (rolo, tipo) => {
-    const el = inputRefs.current[keyFor(rolo, tipo)];
-    if (!el) return false;
-    el.focus();
-    if (typeof el.select === "function") el.select();
-    return true;
   };
 
   useEffect(() => {
@@ -2046,7 +2067,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     const targetTreat = editFocus?.treatId || activeTreat;
     if (targetTreat && targetTreat !== activeTreat) return;
 
-    const rolo = editFocus?.rolo || rolos[rolos.length - 1];
+    const rolo = editFocus?.rolo || rolos[0];
     const tipoPriority = editFocus?.tipo
       ? [editFocus.tipo, ...TIPOS.filter(t => t !== editFocus.tipo)]
       : ["M", "A", "N"];
@@ -2055,6 +2076,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
       for (const tipo of tipoPriority) {
         const el = inputRefs.current[keyFor(rolo, tipo)];
         if (el) {
+          setActiveRolo(rolo);
           el.scrollIntoView({ block: "nearest", inline: "center" });
           el.focus();
           if (typeof el.select === "function") el.select();
@@ -2062,12 +2084,17 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
         }
       }
       if (gridScrollRef.current) {
-        gridScrollRef.current.scrollLeft = gridScrollRef.current.scrollWidth;
+        gridScrollRef.current.scrollLeft = 0;
       }
     }, 0);
   }, [editIdx, editFocus, activeTreat]);
 
-  const getTipoOrder = () => (navModeRef.current === "reverse" ? ["M", "A", "N"] : TIPOS);
+  const getTipoOrder = () => (navModeRef.current === "reverse" ? ["M", "A", "N"] : ["N", "A", "M"]);
+
+  const isLastTipoOfRolo = (tipo) => {
+    const tipos = getTipoOrder();
+    return tipos[tipos.length - 1] === tipo;
+  };
 
   const nextCoords = (rolo, tipo) => {
     const roloIdx = rolos.indexOf(rolo);
@@ -2099,6 +2126,15 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     }
     if (!prevRolo || !prevTipo) return null;
     return { rolo: prevRolo, tipo: prevTipo };
+  };
+
+  const focusCell = (rolo, tipo) => {
+    const el = inputRefs.current[keyFor(rolo, tipo)];
+    if (!el) return false;
+    setActiveRolo(rolo);
+    el.focus();
+    if (typeof el.select === "function") el.select();
+    return true;
   };
 
   const focusNext = (rolo, tipo) => {
@@ -2144,17 +2180,25 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     if (num > seedsPerRolo) num = seedsPerRolo;
 
     setCell(rolo, tipo, String(num));
+    setActiveRolo(rolo);
 
     if (tipo === "M") navModeRef.current = "reverse";
     if (tipo === "N") navModeRef.current = "normal";
 
+    const ultimoTipo = isLastTipoOfRolo(tipo);
     const shouldAdvanceNow = digits.length >= 2 || num >= 10;
+
+    if (ultimoTipo) {
+      setTimeout(() => focusNext(rolo, tipo), 0);
+      return;
+    }
+
     if (shouldAdvanceNow) {
       setTimeout(() => focusNext(rolo, tipo), 0);
       return;
     }
 
-    timersRef.current[key] = setTimeout(() => focusNext(rolo, tipo), 650);
+    timersRef.current[key] = setTimeout(() => focusNext(rolo, tipo), 350);
   };
 
   return (
@@ -2258,6 +2302,39 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                 }}
               >
                 Normal
+              </button>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, color: UI.textSoft, fontFamily: FONT_SANS }}>Análise:</span>
+            <div style={{ display: "flex", border: `1px solid ${UI.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setCountAnalysisDays(5)}
+                style={{
+                  background: countAnalysisDays === 5 ? UI.accent : "transparent",
+                  color: countAnalysisDays === 5 ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                5 dias
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setCountAnalysisDays(7)}
+                style={{
+                  background: countAnalysisDays === 7 ? UI.accent : "transparent",
+                  color: countAnalysisDays === 7 ? "#fff" : UI.textSoft,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: FONT_SANS,
+                }}
+              >
+                7 dias
               </button>
             </div>
           </div>
@@ -2374,9 +2451,32 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                 {/* Linha de cabeçalho com nomes dos rolos */}
                 <div style={{ display: "grid", gridTemplateColumns: `70px repeat(${rolos.length}, 1fr)`, gap: 6, marginBottom: 6 }}>
                   <div />
-                  {rolos.map(r => (
-                    <div key={r} style={{ fontSize: 10, color: UI.textSoft, textAlign: "center", fontFamily: FONT_SANS }}>{r}</div>
-                  ))}
+                  {rolos.map(r => {
+                    const completo = ["N", "A", "M"].every(tp => {
+                      const v = grid[activeTreat]?.[r]?.[tp];
+                      return v !== "" && v !== null && typeof v !== "undefined";
+                    });
+                    const isActive = activeRolo === r;
+                    return (
+                      <div
+                        key={r}
+                        style={{
+                          fontSize: 10,
+                          color: isActive ? UI.accent : (completo ? "#6fa58b" : UI.textSoft),
+                          textAlign: "center",
+                          fontFamily: FONT_SANS,
+                          fontWeight: isActive ? 800 : (completo ? 700 : 500),
+                          background: isActive ? "#6f93b518" : (completo ? "#6fa58b10" : "transparent"),
+                          borderRadius: 4,
+                          padding: "4px 2px",
+                          transition: "all 0.15s",
+                          border: `1px solid ${isActive ? "#6f93b566" : "transparent"}`,
+                        }}
+                      >
+                        {r}{completo ? " ✓" : ""}
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {/* Uma linha por tipo: Normal, Anormal, Morta */}
@@ -2386,26 +2486,37 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                       {TIPO_LABELS[tipo]}
                     </div>
                     {/* Um input por rolo — borda colorida quando preenchido */}
-                    {rolos.map(r => (
-                      <input
-                        key={r}
-                        ref={setInputRef(r, tipo)}
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        maxLength={2}
-                        className="cell-input"
-                        value={grid[activeTreat]?.[r]?.[tipo] ?? ""}
-                        onChange={e => handleCellChange(r, tipo, e.target.value)}
-                        onKeyDown={e => handleCellKeyDown(r, tipo, e)}
-                        onFocus={(e) => {
-                          if (tipo === "M") navModeRef.current = "reverse";
-                          if (tipo === "N") navModeRef.current = "normal";
-                          e.target.select();
-                        }}
-                        style={{ borderColor: (grid[activeTreat]?.[r]?.[tipo] ?? "") !== "" ? `${TIPO_COLORS[tipo]}66` : UI.border }}
-                      />
-                    ))}
+                    {rolos.map(r => {
+                      const isActive = activeRolo === r;
+                      const val = grid[activeTreat]?.[r]?.[tipo];
+                      const preenchido = val !== "" && val !== null && typeof val !== "undefined";
+                      return (
+                        <input
+                          key={r}
+                          ref={setInputRef(r, tipo)}
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          maxLength={2}
+                          className="cell-input"
+                          value={val ?? ""}
+                          onChange={e => handleCellChange(r, tipo, e.target.value)}
+                          onKeyDown={e => handleCellKeyDown(r, tipo, e)}
+                          onFocus={(e) => {
+                            if (tipo === "M") navModeRef.current = "reverse";
+                            if (tipo === "N") navModeRef.current = "normal";
+                            setActiveRolo(r);
+                            e.target.select();
+                          }}
+                          style={{
+                            borderColor: preenchido ? `${TIPO_COLORS[tipo]}66` : (isActive ? "#6f93b588" : UI.border),
+                            background: isActive ? "#f8fafc" : "#ffffff",
+                            boxShadow: isActive ? "0 0 0 2px #6f93b522" : "none",
+                            fontWeight: preenchido ? 700 : 500,
+                          }}
+                        />
+                      );
+                    })}
                   </div>
                 ))}
 
@@ -2418,13 +2529,14 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
       <div style={{ position: "fixed", left: -10000, top: 0, background: "#ffffff" }}>
         <div ref={exportSheetRef} style={{ width: 1200, padding: 18, background: "#ffffff", color: "#0f172a", fontFamily: FONT_SANS }}>
           <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.2 }}>
-            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "GerBOX" : "Normal"}
+            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "GerBOX" : "Normal"} · Análise {countAnalysisDays || 5} dias
           </div>
           <div style={{ marginTop: 6, fontSize: 12, color: "#334155", display: "flex", gap: 12, flexWrap: "wrap" }}>
             <span>Dia 0: <b style={{ color: "#0f172a" }}>{day0 ? formatPtBrDate(day0) : "—"}</b></span>
             <span>Contagem: <b style={{ color: "#0f172a" }}>{countDate ? formatPtBrDate(countDate) : "—"}</b></span>
             <span>Montagem: <b style={{ color: "#0f172a" }}>{activeMounting?.label || "—"}</b></span>
             <span>Ensaio: <b style={{ color: "#0f172a" }}>{countTrialId === "sem_vermiculita" ? "Sem vermiculita" : "Principal"}</b></span>
+            <span>Dias análise: <b style={{ color: "#0f172a" }}>{countAnalysisDays || 5}</b></span>
           </div>
 
           {TREATMENTS.map((t) => {
@@ -2551,7 +2663,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
   const activeId = String(activeMountingId || "").trim() || "default";
   const activeMounting = (mountings || []).find((m) => m.id === activeId) || (mountings || [])[0] || null;
   const filteredCounts = (counts || []).filter((c) => getCountMountingId(c) === activeId);
-  const sortedAll = [...filteredCounts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)));
+  const sortedAll = [...filteredCounts].sort((a, b) => (a.dat - b.dat) || (countKindOrder(a) - countKindOrder(b)) || (getCountAnalysisDays(a) - getCountAnalysisDays(b)));
 
   useEffect(() => {
     if (!historyOrder.length) {
@@ -2878,7 +2990,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
         })()}
 
         <KPIBlock label="ÚLTIMA CONTAGEM" val={`DAT ${latest.dat}`}
-          sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "GerBOX" : "Normal"}`}
+          sub={`${formatPtBrDate(latest.countDate || latest.savedAt)} · ${getCountKind(latest) === "vigor" ? "GerBOX" : "Normal"} · ${getCountAnalysisDays(latest)} dias`}
           color="#6f93b5" infoKey="ultimaContagem" />
 
         <KPIBlock label="TOTAL DE CONTAGENS" val={filteredCounts.length}
@@ -3111,6 +3223,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>DAT</th>
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Data</th>
                     <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Tipo</th>
+                    <th style={{ textAlign: "left", padding: "8px 10px", color: UI.textSoft, fontFamily: FONT_SANS, fontSize: 9, letterSpacing: 0.4, fontWeight: 500 }}>Análise</th>
                     {TREATMENTS.flatMap(t =>
                       ["N", "A", "M"].map(tipo => (
                         <th
@@ -3175,6 +3288,9 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
                         </td>
                         <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS }}>
                           {getCountKind(c) === "vigor" ? "GerBOX" : "Normal"}
+                        </td>
+                        <td style={{ padding: "10px", color: UI.textSoft, fontSize: 11, fontFamily: FONT_SANS, fontWeight: 600 }}>
+                          {getCountAnalysisDays(c)} dias
                         </td>
                         {TREATMENTS.flatMap(t =>
                           ["N", "A", "M"].map(tipo => {
