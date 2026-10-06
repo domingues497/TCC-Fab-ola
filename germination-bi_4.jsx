@@ -2855,6 +2855,7 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
     }
     const mountingLabel = activeMounting?.label || "montagem";
     try {
+      const captures = [];
       for (let i = 0; i < ordered.length; i++) {
         const c = ordered[i];
         setBatchExportCount(c);
@@ -2867,27 +2868,54 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
           useCORS: true,
           logging: false,
         });
-        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-        if (!blob) continue;
-        const datLabel = c.dat ?? "?";
-        const kindLabel = getCountKind(c) === "vigor" ? "vigor" : "germinacao";
-        const daysLabel = `${getCountAnalysisDays(c) || 5}dias`;
-        const dateLabel = String(c.countDate || c.savedAt || "").slice(0, 10);
-        const orderLabel = String(i + 1).padStart(2, "0");
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = sanitizeFileName(
-          `${orderLabel}_contagem_${mountingLabel}_dat_${datLabel}_${kindLabel}_${daysLabel}_${dateLabel}.png`
-        );
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        if (i < ordered.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 650));
-        }
+        captures.push({ index: i, entry: c, canvas });
       }
+      if (!captures.length) throw new Error("Nada para exportar.");
+
+      const width = Math.max(...captures.map((x) => x.canvas.width));
+      const gap = 40;
+      const height = captures.reduce((sum, x, idx) => {
+        return sum + x.canvas.height + (idx < captures.length - 1 ? gap : 0);
+      }, 0);
+
+      const out = document.createElement("canvas");
+      out.width = width;
+      out.height = height;
+      const ctx = out.getContext("2d");
+      if (!ctx) throw new Error("Canvas não disponível para exportação.");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, out.width, out.height);
+
+      let y = 0;
+      captures.forEach((x, idx) => {
+        ctx.drawImage(x.canvas, 0, y);
+        y += x.canvas.height;
+        if (idx < captures.length - 1) {
+          ctx.fillStyle = "#e5e7eb";
+          ctx.fillRect(0, y, out.width, gap);
+          y += gap;
+        }
+      });
+
+      const blob = await new Promise((resolve) => out.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Não foi possível gerar o PNG.");
+
+      const first = ordered[0];
+      const last = ordered[ordered.length - 1];
+      const firstDat = first?.dat ?? "?";
+      const lastDat = last?.dat ?? "?";
+      const firstDate = String(first?.countDate || first?.savedAt || "").slice(0, 10);
+      const lastDate = String(last?.countDate || last?.savedAt || "").slice(0, 10);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = sanitizeFileName(
+        `contagens_${mountingLabel}_DAT_${firstDat}_a_${lastDat}_${firstDate}_a_${lastDate}_${ordered.length}contagens.png`
+      );
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } catch (err) {
       alert(err?.message || "Não foi possível exportar todas as contagens.");
     } finally {
@@ -3256,12 +3284,12 @@ function DashboardView({ counts, mountings, activeMountingId, setActiveMountingI
               color: UI.textSoft,
             }}
           >
-            📷 Exportar TODAS (PNG)
+            📷 Exportar TUDO em 1 PNG
           </button>
         </div>
         <p style={{ color: UI.textSoft, fontSize: 11, marginBottom: 12 }}>
           Segure na coluna <b>Ordem</b> (⋮⋮) e arraste para reorganizar as linhas com o mouse.
-          Os arquivos PNG serão exportados na mesma ordem exibida acima.
+          Todas as contagens serão reunidas em <b>um único arquivo PNG</b> na mesma ordem exibida acima.
         </p>
         {historyOrder.length === 0
           ? <p style={{ color: UI.textSoft, fontSize: 12 }}>Sem contagens.</p>
