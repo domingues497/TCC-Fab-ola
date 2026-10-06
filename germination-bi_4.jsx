@@ -2021,7 +2021,6 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
   const timersRef = useRef({});
   const gridScrollRef = useRef(null);
   const lastAutoFocusKeyRef = useRef("");
-  const navModeRef = useRef("reverse");
   const exportSheetRef = useRef(null);
   const [activeRolo, setActiveRolo] = useState(null);
   const rolos = getRolosForCount(countTrialId, countKind, countRolosCount);
@@ -2070,7 +2069,7 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     const rolo = editFocus?.rolo || rolos[0];
     const tipoPriority = editFocus?.tipo
       ? [editFocus.tipo, ...TIPOS.filter(t => t !== editFocus.tipo)]
-      : ["M", "A", "N"];
+      : ["N", "A", "M"];
 
     setTimeout(() => {
       for (const tipo of tipoPriority) {
@@ -2089,12 +2088,9 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     }, 0);
   }, [editIdx, editFocus, activeTreat]);
 
-  const getTipoOrder = () => (navModeRef.current === "reverse" ? ["M", "A", "N"] : ["N", "A", "M"]);
+  const getTipoOrder = () => ["N", "A", "M"];
 
-  const isLastTipoOfRolo = (tipo) => {
-    const tipos = getTipoOrder();
-    return tipos[tipos.length - 1] === tipo;
-  };
+  const isLastTipoOfRolo = (tipo) => tipo === "M";
 
   const nextCoords = (rolo, tipo) => {
     const roloIdx = rolos.indexOf(rolo);
@@ -2182,23 +2178,18 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
     setCell(rolo, tipo, String(num));
     setActiveRolo(rolo);
 
-    if (tipo === "M") navModeRef.current = "reverse";
-    if (tipo === "N") navModeRef.current = "normal";
-
-    const ultimoTipo = isLastTipoOfRolo(tipo);
-    const shouldAdvanceNow = digits.length >= 2 || num >= 10;
-
-    if (ultimoTipo) {
+    if (tipo === "M") {
       setTimeout(() => focusNext(rolo, tipo), 0);
       return;
     }
 
+    const shouldAdvanceNow = digits.length >= 2 || num >= 10;
     if (shouldAdvanceNow) {
       setTimeout(() => focusNext(rolo, tipo), 0);
       return;
     }
 
-    timersRef.current[key] = setTimeout(() => focusNext(rolo, tipo), 350);
+    timersRef.current[key] = setTimeout(() => focusNext(rolo, tipo), 400);
   };
 
   return (
@@ -2503,11 +2494,9 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
                           onChange={e => handleCellChange(r, tipo, e.target.value)}
                           onKeyDown={e => handleCellKeyDown(r, tipo, e)}
                           onFocus={(e) => {
-                            if (tipo === "M") navModeRef.current = "reverse";
-                            if (tipo === "N") navModeRef.current = "normal";
-                            setActiveRolo(r);
-                            e.target.select();
-                          }}
+                          setActiveRolo(r);
+                          e.target.select();
+                        }}
                           style={{
                             borderColor: preenchido ? `${TIPO_COLORS[tipo]}66` : (isActive ? "#6f93b588" : UI.border),
                             background: isActive ? "#f8fafc" : "#ffffff",
@@ -2528,15 +2517,8 @@ function EntryView({ dat, setDat, day0, openTrial, countDate, setCountDate, coun
 
       <div style={{ position: "fixed", left: -10000, top: 0, background: "#ffffff" }}>
         <div ref={exportSheetRef} style={{ width: 1200, padding: 18, background: "#ffffff", color: "#0f172a", fontFamily: FONT_SANS }}>
-          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.2 }}>
-            Contagem DAT {datLabel || "—"} · {countKind === "vigor" ? "GerBOX" : "Normal"} · Análise {countAnalysisDays || 5} dias
-          </div>
-          <div style={{ marginTop: 6, fontSize: 12, color: "#334155", display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <span>Dia 0: <b style={{ color: "#0f172a" }}>{day0 ? formatPtBrDate(day0) : "—"}</b></span>
-            <span>Contagem: <b style={{ color: "#0f172a" }}>{countDate ? formatPtBrDate(countDate) : "—"}</b></span>
-            <span>Montagem: <b style={{ color: "#0f172a" }}>{activeMounting?.label || "—"}</b></span>
-            <span>Ensaio: <b style={{ color: "#0f172a" }}>{countTrialId === "sem_vermiculita" ? "Sem vermiculita" : "Principal"}</b></span>
-            <span>Dias análise: <b style={{ color: "#0f172a" }}>{countAnalysisDays || 5}</b></span>
+          <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: 0.2, textAlign: "center", paddingBottom: 14, borderBottom: "1px solid #e2e8f0" }}>
+            DAT {datLabel || "—"} · {countKind === "vigor" ? "GerBOX" : "Normal"} · Análise de {countAnalysisDays || 5} dias
           </div>
 
           {TREATMENTS.map((t) => {
